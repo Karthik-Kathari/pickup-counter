@@ -2,9 +2,9 @@
 
 A full-stack, self-service **snack pickup counter**: customers reserve snacks from a short catalog, holds expire after two minutes, payment is confirmed through a **signed webhook**, and a pickup/locker endpoint claims paid orders — atomically, without ever overselling.
 
-> ## Current status — Phases 1–2 complete ✅
+> ## Current status — Phases 1–3 complete ✅
 >
-> Implemented and verified against **real PostgreSQL 18.4**: the Phase 1 foundation (monorepo, zod config, migrations, seed, health), plus the Phase 2 catalog and transaction-safe order reservations — `GET /products` with database-computed availability, and `POST /orders` with all-or-nothing, lock-serialized stock reservations and 120-second holds. **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
+> Implemented and verified against **real PostgreSQL 18.4**: the Phase 1 foundation (monorepo, zod config, migrations, seed, health), the Phase 2 catalog and transaction-safe order reservations, and the Phase 3 order-status endpoint `GET /orders/:id` with a hardened lazy-expiration lifecycle. **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
 >
 > Not built yet: payment webhook (Phase 4), pickup endpoint (Phase 5), the customer UI (Phase 7). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
 
@@ -139,6 +139,41 @@ All errors use one envelope: `{ "error": { "code", "message", "details"? } }`.
 
 `availableUnits = GREATEST(stock_quantity − Σ pending-unexpired held quantity, 0)`, computed in one SQL statement with the database clock. `stockQuantity` is physical stock; a difference between the two is the reservation footprint.
 
+### `GET /orders/:id`
+
+Customer-facing status endpoint (the polling target for the Phase 7 UI). The id must be a UUID. Response `200`:
+
+```json
+{
+  "order": {
+    "id": "84a65028-c1ed-498c-90d8-d82ddb793a9b",
+    "status": "pending",
+    "totalPaise": 6000,
+    "createdAt": "2026-10-22T12:00:00.000Z",
+    "expiresAt": "2026-10-22T12:02:00.000Z",
+    "expiresInSeconds": 119,
+    "items": [
+      {
+        "productId": "…uuid…",
+        "name": "Butter Cookies",
+        "quantity": 2,
+        "unitPricePaise": 3000,
+        "lineTotalPaise": 6000
+      }
+    ]
+  }
+}
+```
+
+Status semantics and countdown rules:
+
+- `pending` — the only status that carries `expiresInSeconds`: a non-negative integer computed from the **database clock in the same SELECT** that reads the status, so the two can never disagree. It reflects the remaining hold, not a constant (a TTL-30 server returns ≈30), and it **never increases** across reads: the deadline is immutable after creation and the database clock is monotonic.
+- `expired` — the countdown field is **absent entirely** (an expired order never shows a positive countdown). `paid`/`picked_up` also carry no countdown; `paidAt` appears on `paid` and `picked_up`, `pickedUpAt` and `needsReviewReason` where applicable.
+- Reading an order is an **observation point**: a targeted, guarded `UPDATE … WHERE id = $1 AND status = 'pending' AND expires_at <= now()` flips it to `expired` inside a short transaction before the read — row-level lock only, idempotent, no revival path, and `paid`/`needs_review`/`picked_up` can never match. Physical stock is never written.
+- Items and totals survive expiration: the order is a historical record.
+
+Errors: `400 VALIDATION_ERROR` (non-UUID id; `details[].path = "id"`), `404 ORDER_NOT_FOUND` (unknown id).
+
 ### `POST /orders`
 
 Request (repeated productIds are consolidated by summing — documented policy, enforced by `UNIQUE (order_id, product_id)`):
@@ -186,7 +221,7 @@ Errors:
 4. Any shortage → `ROLLBACK` → zero rows written; otherwise insert order + lines (server-calculated paise totals in SQL), `COMMIT`.
 5. After commit, `expiresInSeconds` is read from the DB clock.
 
-The 120-second hold (`HOLD_TTL_SECONDS`) is reservation-only: creating an order never touches `stock_quantity`. Availability instantly excludes holds whose `expires_at` has passed; the persisted `pending → expired` status flip happens lazily at observation points (order creation now; `GET /orders/:id` in Phase 3) — no background scheduler.
+The 120-second hold (`HOLD_TTL_SECONDS`) is reservation-only: creating an order never touches `stock_quantity`. Availability instantly excludes holds whose `expires_at` has passed; the persisted `pending → expired` status flip happens lazily at the two observation points — order creation (global guarded sweep) and `GET /orders/:id` (targeted guarded update) — no background scheduler.
 
 ## Tests
 
@@ -203,6 +238,7 @@ Implemented (`apps/api/tests/`):
   - T-EXPIRY-01 — deterministic expiry via DB timestamps: availability restored immediately, lazy flip to `expired` on the next observation, no revival.
   - T-VALID-01..n — invalid bodies/quantities/UUIDs → 400; unknown product → 404; duplicate IDs consolidated; server-side pricing ignores client prices; `expiresInSeconds` follows server config (TTL 30 server returns ≈30) and stored hold is exactly 120 s of DB time.
   - T-LOCK-01 — two reversed-order concurrent multi-product orders: exactly one wins, no deadlocks, both products reserved once (5 rounds).
+- `orders-lifecycle.integration.test.ts` — 8 integration tests for `GET /orders/:id` and the expiration lifecycle (T-STATUS-01..09): pending response contract (items, paise totals, ISO timestamps, countdown ≤ hold); unknown → 404; non-UUID → 400; expired hold flips on access while availability is restored by the formula and physical stock stays untouched; repeated reads and sweeps idempotent with a never-increasing countdown; `paid`/`needs_review`/`picked_up` never expired even with passed deadlines; 8 concurrent reads on an expired order stay consistent; countdown follows the stored deadline deterministically (no sleeps).
 
 The webhook-replay and concurrent-pickup-claim mandatory scenarios belong to Phases 4–6 and are **not yet implemented**.
 
@@ -214,28 +250,26 @@ If a validly signed capture arrives for an order whose hold already expired, or 
 
 Executed on the development machine (Windows, Node v24.15.0, npm 11.12.1), against **real PostgreSQL 18.4** run from downloaded official binaries on `127.0.0.1:5433` (Docker unavailable):
 
-| Check                                                   | Result                                                                                                                                                                             |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm install` (lockfile generated, `npm audit`)         | ✅ 0 vulnerabilities after dev-toolchain version bumps (vitest 5, vite 6.4.5, eslint 10)                                                                                           |
-| `npm run typecheck` / `lint` / `format:check` / `build` | ✅ all exit 0 (API via `tsc`, web via `tsc && vite build`)                                                                                                                         |
-| `npm test`                                              | ✅ **31/31** (13 unit + 18 real-PG integration); stable across 4 consecutive full-suite runs (each including 5 rounds × 10 concurrent orders and 5 rounds of reversed-order pairs) |
-| Post-suite DB inspection                                | ✅ zero negative stock, zero oversold holds, zero orphaned lines, zero orders without lines, zero duplicate product lines                                                          |
-| Live smoke check (compiled `dist`, real PG)             | ✅ `GET /products` shape; happy order 201 with `expiresInSeconds: 119`; insufficient → 409; invalid → 400; availability 35→34 with physical stock untouched                        |
-| `npm run migrate` × 2                                   | ✅ run 1 applies `0001_init`; run 2 reports up to date                                                                                                                             |
-| Broken migration (scratch check)                        | ✅ fails naming the file, full rollback, no history row                                                                                                                            |
-| Concurrent migration runners (scratch check)            | ✅ exactly one applies; the other waits on the advisory lock                                                                                                                       |
-| `npm run seed` × 2                                      | ✅ run 1 inserts 5; after simulating consumed stock (=3), run 2 refreshes 5 / inserts 0, stock stays 3                                                                             |
-| `GET /health` with DB up / killed / restarted           | ✅ 200 → 503 (generic, credential-free body) → 200                                                                                                                                 |
-| Production boot with empty env                          | ✅ exits 1 listing both missing variables                                                                                                                                          |
-| Data persistence across database restart                | ✅ 5 products and the consumed-stock row intact                                                                                                                                    |
-| `docker compose up --build`                             | ⚠️ **NOT RUN — Docker unavailable on this machine.** File written and reviewed; must be verified on a Docker-capable machine                                                       |
-| Fresh-clone audit                                       | ⚠️ Deferred to Phase 8 (per plan)                                                                                                                                                  |
-| Graceful-shutdown signal handling                       | ⚠️ Implemented (SIGINT/SIGTERM → close server + pool, 10 s force-exit); live signal behavior **not verified** — Windows does not deliver POSIX signals to native processes         |
+| Check                                                   | Result                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm install` (lockfile generated, `npm audit`)         | ✅ 0 vulnerabilities after dev-toolchain version bumps (vitest 5, vite 6.4.5, eslint 10)                                                                                                                                                                                                                                                                      |
+| `npm run typecheck` / `lint` / `format:check` / `build` | ✅ all exit 0 (API via `tsc`, web via `tsc && vite build`)                                                                                                                                                                                                                                                                                                    |     | `npm test` | ✅ **39/39** (13 unit + 26 real-PG integration); stable across 4 consecutive full-suite runs (each including 5 rounds × 10 concurrent orders, 5 rounds of reversed-order pairs, and the full lifecycle suite) |
+| Post-suite DB inspection                                | ✅ zero negative stock, zero oversold holds, zero orphaned lines, zero orders without lines, zero duplicate product lines                                                                                                                                                                                                                                     |
+| Live smoke check (compiled `dist`, real PG)             | ✅ Phase 2: catalog shape, 201 with `expiresInSeconds: 119`, 409/400 paths, availability 35→34 with physical stock untouched. Phase 3: pending GET returns `expiresInSeconds: 119`; after DB-clock expiry the same order reads `expired` with **no** countdown field and its total intact; unknown → 404 `ORDER_NOT_FOUND`; non-UUID → 400 `VALIDATION_ERROR` |
+| `npm run migrate` × 2                                   | ✅ run 1 applies `0001_init`; run 2 reports up to date                                                                                                                                                                                                                                                                                                        |
+| Broken migration (scratch check)                        | ✅ fails naming the file, full rollback, no history row                                                                                                                                                                                                                                                                                                       |
+| Concurrent migration runners (scratch check)            | ✅ exactly one applies; the other waits on the advisory lock                                                                                                                                                                                                                                                                                                  |
+| `npm run seed` × 2                                      | ✅ run 1 inserts 5; after simulating consumed stock (=3), run 2 refreshes 5 / inserts 0, stock stays 3                                                                                                                                                                                                                                                        |
+| `GET /health` with DB up / killed / restarted           | ✅ 200 → 503 (generic, credential-free body) → 200                                                                                                                                                                                                                                                                                                            |
+| Production boot with empty env                          | ✅ exits 1 listing both missing variables                                                                                                                                                                                                                                                                                                                     |
+| Data persistence across database restart                | ✅ 5 products and the consumed-stock row intact                                                                                                                                                                                                                                                                                                               |
+| `docker compose up --build`                             | ⚠️ **NOT RUN — Docker unavailable on this machine.** File written and reviewed; must be verified on a Docker-capable machine                                                                                                                                                                                                                                  |
+| Fresh-clone audit                                       | ⚠️ Deferred to Phase 8 (per plan)                                                                                                                                                                                                                                                                                                                             |
+| Graceful-shutdown signal handling                       | ⚠️ Implemented (SIGINT/SIGTERM → close server + pool, 10 s force-exit); live signal behavior **not verified** — Windows does not deliver POSIX signals to native processes                                                                                                                                                                                    |
 
 ## Limitations (current and known)
 
 - Payment webhook (Phase 4) and pickup endpoint (Phase 5) do not exist yet; two of the three mandatory concurrency scenarios (webhook replay, concurrent pickup claims) are therefore still pending.
-- `GET /orders/:id` (status polling) arrives in Phase 3; today an order's ID is only observable in the creation response and in the database.
 - The customer UI is a placeholder; the real storefront is Phase 7.
 - Compose is unverified on this machine (no Docker). The schema, migrations, seed and health behavior were verified against real PostgreSQL 18.4 rather than the Compose `postgres:16-alpine` image — same protocol/SQL surface, but the image itself still needs its first run.
 - No authentication/authorization, refunds automation, admin UI, or observability beyond `/health` — deliberately out of assignment scope.

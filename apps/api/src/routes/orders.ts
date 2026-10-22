@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type { Pool, PoolClient } from 'pg';
 import { HttpError } from '../errors.js';
-import { expireStalePendingOrders } from '../orders/lifecycle.js';
+import { expireOrderIfStale, expireStalePendingOrders } from '../orders/lifecycle.js';
 
 /**
  * POST /orders — transactional, all-or-nothing stock reservation.
@@ -299,8 +299,141 @@ export async function createOrder(
   };
 }
 
+/**
+ * GET /orders/:id — customer-facing order status (polling endpoint).
+ *
+ * Transaction shape (short; no network I/O inside):
+ *   1. Targeted lazy flip: the same guarded `pending → expired` update,
+ *      scoped to this one order (row-level lock, idempotent).
+ *   2. SELECT the order, computing `expires_in_seconds` from the database
+ *      clock in the same statement, so the status and the countdown in one
+ *      response can never disagree.
+ * Non-pending orders get no countdown field at all: an expired order never
+ * presents a positive remaining time, and the value can never increase
+ * across reads because the database clock is monotonic and the deadline is
+ * immutable after creation.
+ */
+export interface OrderStatusResponse {
+  id: string;
+  status: string;
+  totalPaise: number;
+  createdAt: string;
+  expiresAt: string;
+  expiresInSeconds?: number;
+  paidAt?: string;
+  pickedUpAt?: string;
+  needsReviewReason?: string;
+  items: OrderItemResponse[];
+}
+
+interface OrderStatusRow {
+  id: string;
+  status: string;
+  total_paise: string;
+  created_at: Date;
+  expires_at: Date;
+  paid_at: Date | null;
+  picked_up_at: Date | null;
+  needs_review_reason: string | null;
+  expires_in_seconds: number;
+}
+
+const orderStatusSchema = z.object({
+  id: z.string().uuid('id must be a valid UUID'),
+});
+
+function toIsoOrUndefined(value: Date | null): string | undefined {
+  return value === null ? undefined : value.toISOString();
+}
+
+export async function getOrder(pool: Pool, rawId: string): Promise<OrderStatusResponse> {
+  const parsed = orderStatusSchema.safeParse({ id: rawId });
+  if (!parsed.success) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'Request parameters failed validation',
+      parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+    );
+  }
+  const orderId = parsed.data.id;
+
+  const client = await pool.connect();
+  let row: OrderStatusRow | undefined;
+  try {
+    await client.query('BEGIN');
+    await expireOrderIfStale(client, orderId);
+    const result = await client.query<OrderStatusRow>(
+      `
+        SELECT id,
+               status,
+               total_paise,
+               created_at,
+               expires_at,
+               paid_at,
+               picked_up_at,
+               needs_review_reason,
+               GREATEST(
+                 FLOOR(EXTRACT(EPOCH FROM (expires_at - now())))::int,
+                 0
+               ) AS expires_in_seconds
+          FROM orders
+         WHERE id = $1
+      `,
+      [orderId],
+    );
+    row = result.rows[0];
+    if (row === undefined) {
+      throw new HttpError(404, 'ORDER_NOT_FOUND', 'Order not found');
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  // order_lines are immutable after creation, so reading them after commit
+  // keeps the transaction short without risking inconsistency.
+  const items = await fetchOrderItems(orderId, pool);
+
+  const response: OrderStatusResponse = {
+    id: row.id,
+    status: row.status,
+    totalPaise: Number(row.total_paise),
+    createdAt: row.created_at.toISOString(),
+    expiresAt: row.expires_at.toISOString(),
+    items,
+  };
+  if (row.status === 'pending') {
+    response.expiresInSeconds = row.expires_in_seconds;
+  }
+  const paidAt = toIsoOrUndefined(row.paid_at);
+  if (paidAt !== undefined) {
+    response.paidAt = paidAt;
+  }
+  const pickedUpAt = toIsoOrUndefined(row.picked_up_at);
+  if (pickedUpAt !== undefined) {
+    response.pickedUpAt = pickedUpAt;
+  }
+  if (row.needs_review_reason !== null) {
+    response.needsReviewReason = row.needs_review_reason;
+  }
+  return response;
+}
+
 export function createOrdersRouter(pool: Pool, holdTtlSeconds: number): Router {
   const router = Router();
+
+  router.get('/orders/:id', async (req, res, next) => {
+    try {
+      const order = await getOrder(pool, String(req.params.id));
+      res.json({ order });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.post('/orders', async (req, res, next) => {
     try {

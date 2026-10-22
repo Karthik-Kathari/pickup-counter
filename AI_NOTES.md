@@ -47,6 +47,12 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Resolution:** Split into two statements: a pure lock statement (`SELECT id … ORDER BY id FOR UPDATE`), then a separate availability statement whose fresh snapshot sees everything committed while the locks were awaited. The bug and its mechanism are documented in the code comments and README.
 - **Two smaller Phase 2 catches, for completeness:** (1) `SUM()` returns `bigint`, so `available_units` crossed the JSON boundary as a string (`expected '4' to be 4`) — fixed with an explicit `::int` cast in SQL; (2) test fixtures expired orders by moving only `expires_at`, violating the legitimate `orders_expires_after_creation` CHECK — fixed by moving `created_at` too (simulating an hour-old order) rather than weakening the schema constraint.
 
+### Later real mistakes (Phase 3)
+
+- **Mistake:** Two defects in the newly written lifecycle test code: an assertion expected `totalPaise` 7500 when the fixture's default price (1500 × 3) makes it 4500, and a query `WHERE id = ANY ($1::uuid[])` was given three bind parameters instead of one array (runtime error: "bind message supplies 3 parameters, but prepared statement requires 1").
+- **Detected by:** Running the suite — both failures pointed at the test lines, not the endpoint. The `GET /orders/:id` implementation itself passed all nine required cases on its first run.
+- **Resolution:** Corrected the expected total and the parameter binding. Recorded here because both are real defects that existed in the committed code, however small.
+
 ## 5. Human verification performed
 
 **Status: PENDING — no human verification has been performed yet.**

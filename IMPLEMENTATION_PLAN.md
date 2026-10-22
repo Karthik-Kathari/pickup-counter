@@ -5,7 +5,7 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
 
 - Baseline specification: `ACCEPTANCE_CRITERIA.md` (derived from the assignment).
 - Engineering invariants and conventions: `AGENTS.md`.
-- Current status: **Phases 1–2 complete (catalog + transaction-safe order reservations verified against real PostgreSQL). Phase 3 is next.**
+- Current status: **Phases 1–3 complete (order status endpoint + hardened lazy-expiration lifecycle verified against real PostgreSQL). Phase 4 is next.**
 
 **Priority rule:** backend correctness and real-database tests always outrank cosmetic frontend work. If time is cut short, ship Phases 1–6 working and documented over a polished UI.
 
@@ -111,9 +111,12 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   - Integration tests: hold expiry flips status; expired orders report `expiresInSeconds = 0`; concurrent status reads stay consistent.
 - **Commands:** `npm test`; manual: create order, watch `GET /orders/:id` become `expired`.
 - **Exit criteria:**
-  - [ ] An unpaid order becomes `expired` without any background job (deterministic, test-friendly).
-  - [ ] Expiry uses DB time; a deliberately skewed process clock changes nothing (inspection + test using SQL-set `expires_at`).
-  - [ ] `GET /orders/:id` never returns an internal error for unknown IDs (clean `404 NOT_FOUND`).
+  - [x] An unpaid order becomes `expired` without any background job (deterministic, test-friendly). _(T-EXPIRY-01 + T-STATUS-03/04: DB-clock expiry via SQL-set timestamps; flip happens at both observation points — creation sweep and status read.)_
+  - [x] Expiry uses DB time; a deliberately skewed process clock changes nothing (inspection + test using SQL-set `expires_at`). _(Inspection: every expiry decision is a `now()` comparison in SQL; no Node clock is read anywhere in the lifecycle path. Countdown follows the stored deadline: shrink `expires_at` to 5 s → read ≈5, T-STATUS-09.)_
+  - [x] `GET /orders/:id` never returns an internal error for unknown IDs (clean `404 NOT_FOUND`). _(T-STATUS-02: 404 `ORDER_NOT_FOUND`; T-STATUS-08: non-UUID → 400 `VALIDATION_ERROR`; live smoke on compiled dist confirms both.)_
+
+  **Recorded during implementation:** two defects were found in the new test code itself on the first run (a wrong expected total — the fixture's default price is 1500, not 2500 — and a `WHERE id = ANY($1)` binding passed as three parameters instead of one array). Both were fixed in the tests; the endpoint implementation passed on its first run. Logged in `AI_NOTES.md`. No schema change was needed; no `0002` migration exists.
+
 - **Common failure modes:**
   - A cron/sweep-based expiration that makes tests flaky — rejected in favor of lazy flips + formula exclusion.
   - Non-guarded status updates (no `AND status='pending'`) that let two paths both "expire" or un-expire an order.
