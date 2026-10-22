@@ -19,7 +19,7 @@ function bootstrap(): void {
   }
 
   const pool = createPool(config.databaseUrl);
-  const app = createApp({ pool });
+  const app = createApp({ pool, holdTtlSeconds: config.holdTtlSeconds });
 
   const server: Server = app.listen(config.apiPort, () => {
     console.log(`[api] listening on port ${config.apiPort} (${config.nodeEnv})`);

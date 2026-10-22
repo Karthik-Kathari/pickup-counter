@@ -3,7 +3,7 @@
 Honest record of how AI was used while building this project.
 **Rule: never fabricate.** Only record what actually happened, when it happened. Fields stay `PENDING` until real experience fills them. Recording a fabricated tool, prompt, mistake, or verification is itself an academic-integrity violation.
 
-_Last updated: Phase 1 (application foundation)._
+_Last updated: Phase 2 (catalog + order reservations)._
 
 ---
 
@@ -40,11 +40,18 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Detected by:** The AI-written unit test `collects multiple issues in a single failure` (`apps/api/tests/config.test.ts`), which asserted ≥ 3 collected issues and failed with exactly 2. (Found on the first full test run of Phase 1 — the test caught the code, not the other way around.)
 - **Resolution:** Restructured `loadConfig` so zod validates shape/enum/integer fields while cross-field policy checks run unconditionally on the raw source after parsing, guaranteeing every problem is reported in one failure. All 13 config tests now pass; the behavior is covered by the same test that caught the bug.
 
+### Later real mistakes (Phase 2)
+
+- **Mistake (serious — a genuine oversell bug):** The first `POST /orders` implementation computed availability in the **same SQL statement** that took the `FOR UPDATE` locks, even though the plan documented "lock first, then compute availability in a later statement". Under READ COMMITTED that statement's snapshot is taken _before_ it waits for the locks, so a transaction that queued behind a competitor still read pre-competitor availability. Result: all ten racers in the mandatory concurrency test created orders for a 2-unit product, and both reversed-order pairs in the lock-ordering test succeeded.
+- **Detected by:** The AI-written integration tests T-CONC-01 and T-LOCK-01 (`apps/api/tests/orders.integration.test.ts`): `expected 10 to be 2` and `expected [201, 201] to deeply equal [201, 409]` — the tests proved the oversell instead of being adjusted to hide it.
+- **Resolution:** Split into two statements: a pure lock statement (`SELECT id … ORDER BY id FOR UPDATE`), then a separate availability statement whose fresh snapshot sees everything committed while the locks were awaited. The bug and its mechanism are documented in the code comments and README.
+- **Two smaller Phase 2 catches, for completeness:** (1) `SUM()` returns `bigint`, so `available_units` crossed the JSON boundary as a string (`expected '4' to be 4`) — fixed with an explicit `::int` cast in SQL; (2) test fixtures expired orders by moving only `expires_at`, violating the legitimate `orders_expires_after_creation` CHECK — fixed by moving `created_at` too (simulating an hour-old order) rather than weakening the schema constraint.
+
 ## 5. Human verification performed
 
 **Status: PENDING — no human verification has been performed yet.**
 
-The Phase 1 verification listed in the README and completion report was executed by the AI agent on the developer's machine, not by the human. The human should still: review the diff, re-run `npm install && npm run typecheck && npm run lint && npm test` (with a PostgreSQL available and `TEST_DATABASE_URL` set), run `docker compose up --build` on a Docker-capable machine, and complete the clean-clone audit in `IMPLEMENTATION_PLAN.md` Phase 8.
+The Phase 1 and Phase 2 verification listed in the README and completion reports was executed by the AI agent on the developer's machine, not by the human. The human should still: review the diff, re-run `npm install && npm run typecheck && npm run lint && npm test` (with a PostgreSQL available and `TEST_DATABASE_URL` set), run `docker compose up --build` on a Docker-capable machine, and complete the clean-clone audit in `IMPLEMENTATION_PLAN.md` Phase 8.
 
 - _PENDING — to be filled by the human (or by a human-supervised re-run) when it actually happens._
 

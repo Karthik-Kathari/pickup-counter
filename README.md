@@ -2,11 +2,11 @@
 
 A full-stack, self-service **snack pickup counter**: customers reserve snacks from a short catalog, holds expire after two minutes, payment is confirmed through a **signed webhook**, and a pickup/locker endpoint claims paid orders — atomically, without ever overselling.
 
-> ## Current status — Phase 1 complete ✅
+> ## Current status — Phases 1–2 complete ✅
 >
-> The application foundation is implemented and verified: npm-workspaces monorepo, zod-validated configuration, PostgreSQL schema + advisory-lock migration runner, idempotent seed, `GET /health` with real database checks, Docker Compose definition, and a minimal React starter. Verified against a **real PostgreSQL 18.4** (see [Verification](#verification-status)); **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
+> Implemented and verified against **real PostgreSQL 18.4**: the Phase 1 foundation (monorepo, zod config, migrations, seed, health), plus the Phase 2 catalog and transaction-safe order reservations — `GET /products` with database-computed availability, and `POST /orders` with all-or-nothing, lock-serialized stock reservations and 120-second holds. **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
 >
-> Not built yet: orders, stock reservation, payments/pickup endpoints (Phases 2–5), the customer UI (Phase 7). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
+> Not built yet: payment webhook (Phase 4), pickup endpoint (Phase 5), the customer UI (Phase 7). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
 
 ---
 
@@ -85,8 +85,9 @@ pickup-counter/
 │   │   ├── src/config.ts     zod-validated env, fail-fast, no value echoing
 │   │   ├── src/db/           pool factory, advisory-lock migration runner + CLI
 │   │   ├── src/seed/         idempotent seed + CLI
-│   │   ├── src/routes/       /health (more in Phases 2–5)
-│   │   └── tests/            config unit tests + real-PG migration integration tests
+│   │   ├── src/routes/       /health, /products, /orders
+│   │   ├── src/orders/       lazy-expiry lifecycle helper
+│   │   └── tests/            unit + real-PG integration suites (helpers, catalog, orders)
 │   └── web/                  React + Vite starter (Phase 7 builds the real UI)
 ├── docker/init/              first-boot SQL: creates the integration-test database
 ├── docker-compose.yml        db + one-shot init (migrate & seed) + api, health-gated
@@ -95,10 +96,10 @@ pickup-counter/
 
 Core decisions (rationale in [`AGENTS.md`](./AGENTS.md) §3):
 
-- **Money** is integer **paise** everywhere (`BIGINT` columns with CHECKs; no floats anywhere).
-- **Time** comes from the database clock only; `expires_at` is computed in SQL, and `expiresInSeconds` (Phase 2) will be computed from the DB clock at response time.
-- **Availability** (Phase 2) = physical stock − quantities held by _pending, unexpired_ orders. Expired holds never count. `stock_quantity` is only permanently reduced by a successful pickup claim — `CHECK (stock_quantity >= 0)` is the database-level backstop.
-- **Reservations** (Phase 2) will lock product rows `FOR UPDATE` in sorted order inside one transaction — all lines or none.
+- **Money** is integer **paise** everywhere (`BIGINT` columns with CHECKs; no floats anywhere). Totals are computed **in SQL** from `products.price_paise` at execution time; client-supplied prices are ignored; `BIGINT` results are cast to `int` before crossing the JSON boundary.
+- **Time** comes from the database clock only; `expires_at` is computed in SQL (`now() + make_interval(secs => ttl)`), and `expiresInSeconds` is computed from the DB clock in a query **after** the order transaction commits — not hardcoded (verified: a server configured with TTL 30 returns ≈30).
+- **Availability** = physical stock − quantities held by _pending, unexpired_ orders, computed by one SQL expression with `GREATEST(…, 0)` so it can never be negative. Expired holds never count, regardless of whether their order's status row has been flipped yet. `stock_quantity` is only permanently reduced by a successful pickup claim — `CHECK (stock_quantity >= 0)` is the database-level backstop.
+- **Reservations**: `POST /orders` locks product rows `FOR UPDATE` in ascending product_id order inside one transaction; availability is computed in a **later statement** (fresh READ COMMITTED snapshot — the crux that prevents overselling); all lines or none.
 - **Idempotency** is database-enforced: `payment_events.event_id` is a primary key; events are inserted before any side effect (Phase 4).
 - **Order state machine** is encoded in the schema: `status` CHECK over the five states plus coherence checks tying `paid_at` / `picked_up_at` / `needs_review_reason` to the state.
 
@@ -116,16 +117,94 @@ Core decisions (rationale in [`AGENTS.md`](./AGENTS.md) §3):
 3. **Migrations are append-only, one transaction per file**, serialized by `pg_advisory_lock`, with SHA-256 checksums that detect edits to applied files. Limitation: no rollback files, and a single file cannot contain statements PostgreSQL forbids in transactions (e.g. `CREATE INDEX CONCURRENTLY`).
 4. **Seed upserts by fixed UUID and never rewrites `stock_quantity`**, so re-seeding cannot silently reset inventory consumed by real orders (verified).
 
+## HTTP API
+
+All errors use one envelope: `{ "error": { "code", "message", "details"? } }`.
+
+### `GET /products`
+
+```json
+{
+  "products": [
+    {
+      "id": "6a4c8e2f-3d71-4b95-9e0a-1f8c2d6b4a39",
+      "name": "Butter Cookies",
+      "pricePaise": 3000,
+      "stockQuantity": 35,
+      "availableUnits": 34
+    }
+  ]
+}
+```
+
+`availableUnits = GREATEST(stock_quantity − Σ pending-unexpired held quantity, 0)`, computed in one SQL statement with the database clock. `stockQuantity` is physical stock; a difference between the two is the reservation footprint.
+
+### `POST /orders`
+
+Request (repeated productIds are consolidated by summing — documented policy, enforced by `UNIQUE (order_id, product_id)`):
+
+```json
+{ "items": [{ "productId": "…uuid…", "quantity": 2 }] }
+```
+
+Response `201` (with `Location: /orders/:id`):
+
+```json
+{
+  "order": {
+    "id": "11bbedb9-2909-450e-99ad-28384f5a1928",
+    "status": "pending",
+    "totalPaise": 6000,
+    "expiresInSeconds": 119,
+    "items": [
+      {
+        "productId": "…uuid…",
+        "name": "Butter Cookies",
+        "quantity": 2,
+        "unitPricePaise": 3000,
+        "lineTotalPaise": 6000
+      }
+    ]
+  }
+}
+```
+
+Errors:
+
+| Status | Code                 | When                                                                                                          |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------------------- |
+| 400    | `VALIDATION_ERROR`   | Empty cart, non-UUID productId, quantity ≤ 0 / non-integer / > 99, > 20 lines (`details` lists field paths)   |
+| 400    | `INVALID_JSON`       | Malformed JSON body                                                                                           |
+| 404    | `PRODUCT_NOT_FOUND`  | Unknown product IDs (`details.missingProductIds`)                                                             |
+| 409    | `INSUFFICIENT_STOCK` | Any line lacks availability — **nothing is reserved** (`details.shortages`: per-line requested vs. available) |
+
+### The reservation transaction (why it cannot oversell)
+
+1. `BEGIN` (READ COMMITTED) — one guarded `UPDATE` lazily expires stale pending orders.
+2. `SELECT id … ORDER BY id FOR UPDATE` — every referenced product row is locked; the deterministic order means competing transactions acquire the same locks in the same sequence → **no deadlocks**.
+3. A **separate statement** computes availability. Because it runs after the locks are held, its fresh snapshot already includes every competing reservation committed while we waited — this is what eliminates the check-then-insert race. (An earlier version computed availability in the same statement as the lock; its pre-wait snapshot allowed all ten racers through, and the integration tests caught it.)
+4. Any shortage → `ROLLBACK` → zero rows written; otherwise insert order + lines (server-calculated paise totals in SQL), `COMMIT`.
+5. After commit, `expiresInSeconds` is read from the DB clock.
+
+The 120-second hold (`HOLD_TTL_SECONDS`) is reservation-only: creating an order never touches `stock_quantity`. Availability instantly excludes holds whose `expires_at` has passed; the persisted `pending → expired` status flip happens lazily at observation points (order creation now; `GET /orders/:id` in Phase 3) — no background scheduler.
+
 ## Tests
 
-Run with a real PostgreSQL: `TEST_DATABASE_URL` must point at a **disposable** database (Compose creates `pickup_counter_test` on first boot; integration tests `DROP SCHEMA` inside it). There is no mock fallback — without a reachable database the suite fails loudly.
+Run with a real PostgreSQL: `TEST_DATABASE_URL` must point at a **disposable** database (Compose creates `pickup_counter_test` on first boot; integration tests `DROP SCHEMA` inside it). There is no mock fallback — without a reachable database the suite fails loudly. Test files run **serially** (`fileParallelism: false`): they share one test database and reset its schema in `beforeAll`.
 
-Currently implemented (`apps/api/tests/`):
+Implemented (`apps/api/tests/`):
 
-- `config.test.ts` — 13 unit tests for env validation (defaults, production requirements, placeholder-secret rejection, no-password-echo, bounds, multi-issue reporting).
-- `migrations.integration.test.ts` — 4 integration tests on real PostgreSQL: fresh-database apply, idempotent second run, expected tables/constraints/indexes (including all-`BIGINT` money columns and the stock CHECK), and DB-level state-machine enforcement.
+- `config.test.ts` — 13 unit tests for env validation.
+- `migrations.integration.test.ts` — 4 integration tests: fresh apply, idempotent re-run, schema/constraints (all-`BIGINT` money, stock CHECK), DB-level state machine.
+- `catalog.integration.test.ts` — 3 integration tests (T-CATALOG-01, T-AVAIL-01/02): documented JSON shape; pending holds reduce availability but not physical stock; expired holds never reduce availability even before the status flip.
+- `orders.integration.test.ts` — 11 integration tests:
+  - **T-CONC-01 (mandatory scenario 1)** — ten concurrent customers, last two units, repeated for 5 rounds per run: exactly 2 × 201, 8 × 409 `INSUFFICIENT_STOCK`, reserved exactly 2, availability 0, physical stock unchanged, zero orphaned lines or partial orders.
+  - T-ORDER-05 — multi-item order with one insufficient line reserves nothing.
+  - T-EXPIRY-01 — deterministic expiry via DB timestamps: availability restored immediately, lazy flip to `expired` on the next observation, no revival.
+  - T-VALID-01..n — invalid bodies/quantities/UUIDs → 400; unknown product → 404; duplicate IDs consolidated; server-side pricing ignores client prices; `expiresInSeconds` follows server config (TTL 30 server returns ≈30) and stored hold is exactly 120 s of DB time.
+  - T-LOCK-01 — two reversed-order concurrent multi-product orders: exactly one wins, no deadlocks, both products reserved once (5 rounds).
 
-The three mandatory concurrency scenarios (last-two-units race, webhook replay, concurrent pickup claims) belong to Phases 4–6 and are **not yet implemented**.
+The webhook-replay and concurrent-pickup-claim mandatory scenarios belong to Phases 4–6 and are **not yet implemented**.
 
 ## Late-payment policy (conservative)
 
@@ -135,25 +214,28 @@ If a validly signed capture arrives for an order whose hold already expired, or 
 
 Executed on the development machine (Windows, Node v24.15.0, npm 11.12.1), against **real PostgreSQL 18.4** run from downloaded official binaries on `127.0.0.1:5433` (Docker unavailable):
 
-| Check                                                   | Result                                                                                                                                                                     |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm install` (lockfile generated, `npm audit`)         | ✅ 0 vulnerabilities after dev-toolchain version bumps (vitest 5, vite 6.4.5, eslint 10)                                                                                   |
-| `npm run typecheck` / `lint` / `format:check` / `build` | ✅ all exit 0 (API via `tsc`, web via `tsc && vite build`)                                                                                                                 |
-| `npm test`                                              | ✅ 17/17 (13 unit + 4 real-PG integration)                                                                                                                                 |
-| `npm run migrate` × 2                                   | ✅ run 1 applies `0001_init`; run 2 reports up to date                                                                                                                     |
-| Broken migration (scratch check)                        | ✅ fails naming the file, full rollback, no history row                                                                                                                    |
-| Concurrent migration runners (scratch check)            | ✅ exactly one applies; the other waits on the advisory lock                                                                                                               |
-| `npm run seed` × 2                                      | ✅ run 1 inserts 5; after simulating consumed stock (=3), run 2 refreshes 5 / inserts 0, stock stays 3                                                                     |
-| `GET /health` with DB up / killed / restarted           | ✅ 200 → 503 (generic, credential-free body) → 200                                                                                                                         |
-| Production boot with empty env                          | ✅ exits 1 listing both missing variables                                                                                                                                  |
-| Data persistence across database restart                | ✅ 5 products and the consumed-stock row intact                                                                                                                            |
-| `docker compose up --build`                             | ⚠️ **NOT RUN — Docker unavailable on this machine.** File written and reviewed; must be verified on a Docker-capable machine                                               |
-| Fresh-clone audit                                       | ⚠️ Deferred to Phase 8 (per plan)                                                                                                                                          |
-| Graceful-shutdown signal handling                       | ⚠️ Implemented (SIGINT/SIGTERM → close server + pool, 10 s force-exit); live signal behavior **not verified** — Windows does not deliver POSIX signals to native processes |
+| Check                                                   | Result                                                                                                                                                                             |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm install` (lockfile generated, `npm audit`)         | ✅ 0 vulnerabilities after dev-toolchain version bumps (vitest 5, vite 6.4.5, eslint 10)                                                                                           |
+| `npm run typecheck` / `lint` / `format:check` / `build` | ✅ all exit 0 (API via `tsc`, web via `tsc && vite build`)                                                                                                                         |
+| `npm test`                                              | ✅ **31/31** (13 unit + 18 real-PG integration); stable across 4 consecutive full-suite runs (each including 5 rounds × 10 concurrent orders and 5 rounds of reversed-order pairs) |
+| Post-suite DB inspection                                | ✅ zero negative stock, zero oversold holds, zero orphaned lines, zero orders without lines, zero duplicate product lines                                                          |
+| Live smoke check (compiled `dist`, real PG)             | ✅ `GET /products` shape; happy order 201 with `expiresInSeconds: 119`; insufficient → 409; invalid → 400; availability 35→34 with physical stock untouched                        |
+| `npm run migrate` × 2                                   | ✅ run 1 applies `0001_init`; run 2 reports up to date                                                                                                                             |
+| Broken migration (scratch check)                        | ✅ fails naming the file, full rollback, no history row                                                                                                                            |
+| Concurrent migration runners (scratch check)            | ✅ exactly one applies; the other waits on the advisory lock                                                                                                                       |
+| `npm run seed` × 2                                      | ✅ run 1 inserts 5; after simulating consumed stock (=3), run 2 refreshes 5 / inserts 0, stock stays 3                                                                             |
+| `GET /health` with DB up / killed / restarted           | ✅ 200 → 503 (generic, credential-free body) → 200                                                                                                                                 |
+| Production boot with empty env                          | ✅ exits 1 listing both missing variables                                                                                                                                          |
+| Data persistence across database restart                | ✅ 5 products and the consumed-stock row intact                                                                                                                                    |
+| `docker compose up --build`                             | ⚠️ **NOT RUN — Docker unavailable on this machine.** File written and reviewed; must be verified on a Docker-capable machine                                                       |
+| Fresh-clone audit                                       | ⚠️ Deferred to Phase 8 (per plan)                                                                                                                                                  |
+| Graceful-shutdown signal handling                       | ⚠️ Implemented (SIGINT/SIGTERM → close server + pool, 10 s force-exit); live signal behavior **not verified** — Windows does not deliver POSIX signals to native processes         |
 
 ## Limitations (current and known)
 
-- Business endpoints (products, orders, webhook, pickup) do not exist yet — Phases 2–5.
+- Payment webhook (Phase 4) and pickup endpoint (Phase 5) do not exist yet; two of the three mandatory concurrency scenarios (webhook replay, concurrent pickup claims) are therefore still pending.
+- `GET /orders/:id` (status polling) arrives in Phase 3; today an order's ID is only observable in the creation response and in the database.
 - The customer UI is a placeholder; the real storefront is Phase 7.
 - Compose is unverified on this machine (no Docker). The schema, migrations, seed and health behavior were verified against real PostgreSQL 18.4 rather than the Compose `postgres:16-alpine` image — same protocol/SQL surface, but the image itself still needs its first run.
 - No authentication/authorization, refunds automation, admin UI, or observability beyond `/health` — deliberately out of assignment scope.

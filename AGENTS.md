@@ -119,8 +119,7 @@ Run every applicable command before declaring work complete, and paste the **act
 | `npm run typecheck`                     | Strict TypeScript across workspaces                                                                        | Phase 1         |
 | `npm run lint`                          | ESLint                                                                                                     | Phase 1         |
 | `npm run format:check`                  | Prettier                                                                                                   | Phase 1         |
-| `npm test`                              | Vitest suite (unit + real-PG integration tests; the three mandatory concurrency scenarios join in Phase 6) | Phase 1         |
-| `npm run test:integration`              | Integration tests only (needs Postgres)                                                                    | Phase 2         |
+| `npm test`                              | Vitest suite (unit + real-PG integration tests; the three mandatory concurrency scenarios join in Phase 6) | Phase 1         |     | `npm run test:integration` | Integration tests only (needs Postgres) | Phase 6 |
 | `docker compose up --build`             | One-command startup (db + one-shot init + api; web joins in Phase 7)                                       | Phase 1         |
 | `npm run -w apps/api send-webhook -- …` | Send a correctly signed webhook event                                                                      | Phase 4         |
 

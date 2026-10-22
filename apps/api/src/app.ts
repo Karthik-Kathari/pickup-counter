@@ -2,9 +2,12 @@ import express from 'express';
 import type { Pool } from 'pg';
 import { errorHandler, notFoundHandler } from './errors.js';
 import { createHealthRouter } from './routes/health.js';
+import { createOrdersRouter } from './routes/orders.js';
+import { createProductsRouter } from './routes/products.js';
 
 export interface AppDeps {
   pool: Pool;
+  holdTtlSeconds: number;
 }
 
 /**
@@ -18,6 +21,8 @@ export function createApp(deps: AppDeps): express.Express {
   app.use(express.json({ limit: '100kb' }));
 
   app.use(createHealthRouter(deps.pool));
+  app.use(createProductsRouter(deps.pool));
+  app.use(createOrdersRouter(deps.pool, deps.holdTtlSeconds));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

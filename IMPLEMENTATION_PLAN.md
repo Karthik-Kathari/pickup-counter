@@ -5,7 +5,7 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
 
 - Baseline specification: `ACCEPTANCE_CRITERIA.md` (derived from the assignment).
 - Engineering invariants and conventions: `AGENTS.md`.
-- Current status: **Phase 1 complete (application foundation running and verified against real PostgreSQL). Phase 2 is next.**
+- Current status: **Phases 1–2 complete (catalog + transaction-safe order reservations verified against real PostgreSQL). Phase 3 is next.**
 
 **Priority rule:** backend correctness and real-database tests always outrank cosmetic frontend work. If time is cut short, ship Phases 1–6 working and documented over a polished UI.
 
@@ -82,10 +82,16 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   - Basic integration tests for the happy path, validation failures, and the multi-product all-or-nothing case (the big concurrency scenarios land in Phase 6, but basic tests must exist here).
 - **Commands:** `npm test`, `npm run -w apps/api seed`, manual `curl` of both endpoints.
 - **Exit criteria:**
-  - [ ] Availability excludes expired holds (test: create an order with a tiny TTL, wait past expiry, assert `availableUnits` restored before any status flip).
-  - [ ] A two-product request where only one product has stock reserves neither.
-  - [ ] No code path decrements `stock_quantity` in this phase.
-  - [ ] Concurrent-creation smoke test (e.g., 5 parallel requests for 1 unit) shows exactly one success.
+  - [x] Availability excludes expired holds (test: create an order with a tiny TTL, wait past expiry, assert `availableUnits` restored before any status flip). _(T-AVAIL-02: expired hold while order still `pending`; availability fully restored — no sleeps, DB-clock timestamps.)_
+  - [x] A two-product request where only one product has stock reserves neither. _(T-ORDER-05: 2/5 available + 3/1 requested → 409, zero lines, zero orders.)_
+  - [x] No code path decrements `stock_quantity` in this phase. _(Inspection + T-CONC-01 asserts physical stock unchanged after reservations.)_
+  - [x] Concurrent-creation smoke test (e.g., 5 parallel requests for 1 unit) shows exactly one success. _(Exceeded by T-CONC-01: 10 parallel requests for a 2-unit product, exactly 2 winners — 5 rounds per run × 4 runs; plus T-LOCK-01 reversed-order pairs: exactly one winner, no deadlocks.)_
+
+  **Recorded during implementation:**
+  - The first implementation computed availability **in the same statement** as the `FOR UPDATE` lock. That statement's READ COMMITTED snapshot predates the lock wait, so all ten racers saw pre-competitor availability and every one oversold — the integration tests caught it, and availability now runs as a separate post-lock statement (the plan's design all along; the code briefly deviated). See `AI_NOTES.md`.
+  - `vitest` now sets `fileParallelism: false`: integration files share one test database and reset its schema in `beforeAll`, so parallel files dropped the schema under each other. Also recorded in README/AGENTS.
+  - No schema change was needed: `0001_init.sql` already supported reservations (availability formula, five-state machine, `orders(status, expires_at)` index). No `0002` migration exists.
+
 - **Common failure modes:**
   - Checking availability without `FOR UPDATE`, then inserting — the classic oversell window.
   - Lock ordering inconsistent between code paths — any multi-product path must sort by `product_id`.
