@@ -9,15 +9,15 @@
 
 A customer orders snacks from a catalog; the order **reserves** (holds) stock for a short window; the customer pays through an external payment provider that notifies us via a signed webhook; once paid, a locker/pickup endpoint claims the order and permanently deducts the stock.
 
-| Layer     | Choice                                                |
-| --------- | ----------------------------------------------------- |
-| Language  | TypeScript everywhere (strict)                        |
-| API       | Node.js + Express                                     |
-| Database  | PostgreSQL, explicit SQL, explicit transactions       |
-| Frontend  | React + Vite + TypeScript                            |
-| Tests     | Vitest; integration tests against a **real** PostgreSQL |
-| Runtime   | Docker Compose for one-command startup                |
-| Layout    | Monorepo: `apps/api`, `apps/web` (npm workspaces)     |
+| Layer    | Choice                                                  |
+| -------- | ------------------------------------------------------- |
+| Language | TypeScript everywhere (strict)                          |
+| API      | Node.js + Express                                       |
+| Database | PostgreSQL, explicit SQL, explicit transactions         |
+| Frontend | React + Vite + TypeScript                               |
+| Tests    | Vitest; integration tests against a **real** PostgreSQL |
+| Runtime  | Docker Compose for one-command startup                  |
+| Layout   | Monorepo: `apps/api`, `apps/web` (npm workspaces)       |
 
 Deliberately **not** used: ORMs, queues, caches, microservices, Kubernetes, message brokers. Complexity must earn its place by making the assignment's correctness requirements easier to demonstrate. The whole system must be explainable live in a 45-minute interview.
 
@@ -110,19 +110,19 @@ This project's grade rests on demonstrated behavior. Therefore:
 
 Run every applicable command before declaring work complete, and paste the **actual** output in the final report.
 
-| Command                                    | Purpose                                  | Available since |
-| ------------------------------------------ | ---------------------------------------- | --------------- |
-| `npm install`                              | Install workspace dependencies           | Phase 1         |
-| `docker compose up -d db`                  | Start PostgreSQL for local dev/tests     | Phase 1         |
-| `npm run -w apps/api migrate`              | Apply SQL migrations to the dev database | Phase 1         |
-| `npm run -w apps/api seed`                 | Seed the ~5 snack products               | Phase 1         |
-| `npm run typecheck`                        | Strict TypeScript across workspaces      | Phase 1         |
-| `npm run lint`                             | ESLint                                   | Phase 1         |
-| `npm run format:check`                     | Prettier                                 | Phase 1         |
-| `npm test`                                 | Vitest suite (basic tests exist from Phase 2; the three mandatory concurrency scenarios join in Phase 6) | Phase 2 |
-| `npm run test:integration`                 | Integration tests only (needs Postgres)  | Phase 2         |
-| `docker compose up --build`                | One-command full startup                 | Phase 7         |
-| `npm run -w apps/api send-webhook -- …`    | Send a correctly signed webhook event    | Phase 4         |
+| Command                                 | Purpose                                                                                                    | Available since |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------- |
+| `npm install`                           | Install workspace dependencies                                                                             | Phase 1         |
+| `docker compose up -d db`               | Start PostgreSQL for local dev/tests                                                                       | Phase 1         |
+| `npm run -w apps/api migrate`           | Apply SQL migrations to the dev database                                                                   | Phase 1         |
+| `npm run -w apps/api seed`              | Seed the ~5 snack products                                                                                 | Phase 1         |
+| `npm run typecheck`                     | Strict TypeScript across workspaces                                                                        | Phase 1         |
+| `npm run lint`                          | ESLint                                                                                                     | Phase 1         |
+| `npm run format:check`                  | Prettier                                                                                                   | Phase 1         |
+| `npm test`                              | Vitest suite (unit + real-PG integration tests; the three mandatory concurrency scenarios join in Phase 6) | Phase 1         |
+| `npm run test:integration`              | Integration tests only (needs Postgres)                                                                    | Phase 2         |
+| `docker compose up --build`             | One-command startup (db + one-shot init + api; web joins in Phase 7)                                       | Phase 1         |
+| `npm run -w apps/api send-webhook -- …` | Send a correctly signed webhook event                                                                      | Phase 4         |
 
 If a command is not yet available for the current phase, say so honestly rather than inventing an alias that fakes it.
 
@@ -134,7 +134,7 @@ If a command is not yet available for the current phase, say so honestly rather 
 - **`IMPLEMENTATION_PLAN.md`** — check off an exit criterion only after it has been demonstrated (command output, test, or inspection). Partial completion stays unchecked.
 - **`ACCEPTANCE_CRITERIA.md`** — every criterion must map to an automated test ID, a manual verification step, or an inspection; keep the mapping current when tests are added or renamed.
 - **`AI_NOTES.md`** — record only tools, prompts, mistakes, and verifications that actually happened. Fabricating an "AI mistake" or claiming a tool was used is itself a violation.
-- Keep commits focused: one phase or one concern per commit, with a message explaining the *why*.
+- Keep commits focused: one phase or one concern per commit, with a message explaining the _why_.
 
 ---
 

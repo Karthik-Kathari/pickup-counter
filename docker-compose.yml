@@ -1,0 +1,85 @@
+# Docker Compose — PostgreSQL + API with one command:
+#
+#   docker compose up --build
+#
+# Startup order (no schema race):
+#   db     → healthcheck (pg_isready) gates everything downstream
+#   init   → one-shot container: runs migrations, then seed, then exits 0
+#   api    → starts only after db is healthy AND init completed successfully
+#
+# The web frontend is NOT part of Compose yet; it arrives in Phase 7
+# (see IMPLEMENTATION_PLAN.md). Until then run it locally with `npm run dev:web`.
+#
+# Configuration comes from a root `.env` file (copy .env.example) via ${VAR}
+# substitution. No secrets are baked into images.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-pickup_counter}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # First-boot init: creates the disposable integration-test database.
+      # (Only runs when the volume is empty.)
+      - ./docker/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-pickup_counter}']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+
+  init:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command:
+      ['sh', '-c', 'node apps/api/dist/db/migrate-cli.js && node apps/api/dist/seed/seed-cli.js']
+    environment:
+      NODE_ENV: production
+      # Inside the compose network the database host is the service name `db`.
+      DATABASE_URL: 'postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-pickup_counter}'
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me-local-dev-secret}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: 'postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-pickup_counter}'
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me-local-dev-secret}
+      API_PORT: 3001
+      HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-120}
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    ports:
+      - '${API_PORT:-3001}:3001'
+    restart: unless-stopped
+
+volumes:
+  pgdata:

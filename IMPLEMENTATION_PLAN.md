@@ -5,7 +5,7 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
 
 - Baseline specification: `ACCEPTANCE_CRITERIA.md` (derived from the assignment).
 - Engineering invariants and conventions: `AGENTS.md`.
-- Current status: **Phase 0 complete. No application code exists yet.**
+- Current status: **Phase 1 complete (application foundation running and verified against real PostgreSQL). Phase 2 is next.**
 
 **Priority rule:** backend correctness and real-database tests always outrank cosmetic frontend work. If time is cut short, ship Phases 1–6 working and documented over a polished UI.
 
@@ -42,9 +42,11 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   - `apps/api`: Express app factory, config module (zod-validated env, fail-fast on boot), centralized error middleware, `GET /health` (checks DB with `SELECT 1`, returns 200/503), Prettier + ESLint configs.
   - PostgreSQL client: `pg` with a small pool; explicit SQL only.
   - `apps/api/migrations/`: numbered SQL files + a ~50-line runner that applies them in order inside a transaction and records them in `schema_migrations` (advisory lock so concurrent runners can't race).
-    - `0001_init.sql`: `products` (uuid PK, `name`, `price_paise BIGINT NOT NULL CHECK (price_paise >= 0)`, `stock_quantity INTEGER NOT NULL CHECK (stock_quantity >= 0)`), `orders` (uuid PK, `status` with a `CHECK` over the five states, `total_paise`, `expires_at timestamptz`, `created_at`, `paid_at`, `picked_up_at`, `needs_review_reason`), `order_lines` (FK to orders/products, `quantity INTEGER CHECK (quantity > 0)`, `unit_price_paise`, unique `(order_id, product_id)`), `payment_events` (`event_id TEXT PRIMARY KEY`, FK `order_id`, `amount_paise`, `status`, `outcome`, `raw_payload JSONB`, `received_at`), plus indexes on `orders(status, expires_at)` and `order_lines(product_id)`.
-  - `apps/api/seeds/`: seed script inserting ~5 snack products with integer-paise prices.
-  - `docker-compose.yml`: `db` service (official `postgres:16` image, volume, healthcheck) and `api` service built from `apps/api`; ports and env wired from `.env`.
+    - `0001_init.sql`: `products` (uuid PK, stable `key` UNIQUE, `name`, `price_paise BIGINT NOT NULL CHECK (price_paise > 0)`, `stock_quantity INTEGER NOT NULL CHECK (stock_quantity >= 0)`), `orders` (uuid PK, `status` with a `CHECK` over the five states plus state↔timestamp coherence checks, `total_paise`, `expires_at timestamptz`, `created_at`, `paid_at`, `picked_up_at`, `needs_review_reason` with a `CHECK` allowlist), `order_lines` (FK to orders/products, `quantity INTEGER CHECK (quantity > 0)`, `unit_price_paise`, unique `(order_id, product_id)`), `payment_events` (`event_id TEXT PRIMARY KEY`, `order_id uuid` **without FK — recorded deviation**: the ledger must record provider events for unknown orders per ACCEPTANCE_CRITERIA C9 and survive independently of order rows; referential integrity is validated at processing time), plus indexes on `orders(status, expires_at)` and `order_lines(product_id)`.
+    - Pickup claim state lives on the order (`status = 'picked_up'`, `picked_up_at`); a dedicated claims table was deliberately not added — the atomic status flip in the Phase 5 transaction is itself the exactly-once claim record (justified in README).
+  - `apps/api/src/seed/`: seed script inserting 5 snack products with integer-paise prices and fixed UUIDs; upserts by `id` and NEVER rewrites `stock_quantity`.
+  - `docker-compose.yml`: `db` service (official `postgres:16-alpine` image, named volume, healthcheck, first-boot init SQL that creates the test database), a one-shot `init` service (runs migrations + seed, then exits), and an `api` service gated on `db` healthy **and** `init` completed successfully; ports and env wired from `.env`. (Recorded addition vs. the original deliverable list: the one-shot `init` service exists specifically to eliminate the "API healthy before schema exists" race.)
+  - Migration runner notes: session-level `pg_advisory_lock`, per-file transaction, `schema_migrations` history with SHA-256 checksums (editing an applied migration is detected and rejected). Limitations are documented in README and the runner's header comment: append-only migrations, one transaction per file (no `CREATE INDEX CONCURRENTLY`), fixed lock key.
   - `.env` created locally from `.env.example` (never committed).
 - **Commands:**
   - `npm install`
@@ -53,11 +55,11 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   - `npm run typecheck && npm run lint && npm run format:check`
   - `curl -s localhost:3001/health` → `{"status":"ok"}`
 - **Exit criteria:**
-  - [ ] Fresh clone + `.env` from `.env.example` + the commands above yields a healthy API.
-  - [ ] Migrations are idempotent to re-run (`migrate` reports "already applied", exits 0).
-  - [ ] Seed is safe to re-run without duplicating products (upsert by stable product key).
-  - [ ] App refuses to boot with a clear message when `DATABASE_URL`/`WEBHOOK_SECRET` are missing.
-  - [ ] `git status` clean; lockfile committed.
+  - [ ] Fresh clone + `.env` from `.env.example` + the commands above yields a healthy API. _(Partially verified only: the dev machine has **no Docker and no system PostgreSQL**; the same commands were verified against a real local PostgreSQL 18.4 (downloaded binaries, port 5433). The fresh-clone + Compose run remains for Phase 8's audit or any Docker-capable machine.)_
+  - [x] Migrations are idempotent to re-run (`migrate` reports "already applied", exits 0). _(Verified twice against real PostgreSQL; also verified: broken migration rolls back fully with a useful error, and two concurrent runners serialize via the advisory lock — exactly one applies.)_
+  - [x] Seed is safe to re-run without duplicating products (upsert by stable product key). _(Verified: run 1 inserted 5; after manually consuming stock to 3, run 2 refreshed 5 / inserted 0 and stock stayed 3.)_
+  - [x] App refuses to boot with a clear message when `DATABASE_URL`/`WEBHOOK_SECRET` are missing. _(Verified: `NODE_ENV=production` with empty env exits 1 listing both missing variables.)_
+  - [x] `git status` clean; lockfile committed. _(Verified at commit time; `npm audit` reports 0 vulnerabilities after dev-toolchain version bumps.)_
 - **Common failure modes:**
   - Windows path/line-ending trouble in bind mounts — rely on named volumes for Postgres data.
   - Migrations partially applied after a failure — apply each file in a transaction; never edit an applied migration, add a new one instead.

@@ -2,17 +2,13 @@
 
 A full-stack, self-service **snack pickup counter**: customers reserve snacks from a short catalog, holds expire after two minutes, payment is confirmed through a **signed webhook**, and a pickup/locker endpoint claims paid orders — atomically, without ever overselling.
 
-> ## ⚠️ Current status: Phase 0 — planning baseline only
+> ## Current status — Phase 1 complete ✅
 >
-> This repository currently contains **engineering documentation only**. There is no application code, no dependencies are installed, and no test has been run. Everything below the status box describes the **planned** system, with unimplemented items marked. Setup/run commands are **not yet available**. Progress is tracked in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md); verified behavior is tracked in [`ACCEPTANCE_CRITERIA.md`](./ACCEPTANCE_CRITERIA.md).
+> The application foundation is implemented and verified: npm-workspaces monorepo, zod-validated configuration, PostgreSQL schema + advisory-lock migration runner, idempotent seed, `GET /health` with real database checks, Docker Compose definition, and a minimal React starter. Verified against a **real PostgreSQL 18.4** (see [Verification](#verification-status)); **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
+>
+> Not built yet: orders, stock reservation, payments/pickup endpoints (Phases 2–5), the customer UI (Phase 7). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
 
 ---
-
-## Prerequisites (needed once the app exists)
-
-- **Node.js 20+** with npm (workspaces)
-- **Docker + Docker Compose** — PostgreSQL 16 and the app services run in containers; no local PostgreSQL install is required
-- Nothing else; per-phase commands appear in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 
 ## Project goals
 
@@ -21,111 +17,146 @@ A full-stack, self-service **snack pickup counter**: customers reserve snacks fr
 - Fulfill (pick up) paid orders exactly once, deducting physical stock permanently exactly once.
 - Keep every rule explainable in a 45-minute interview: explicit SQL, explicit transactions, no magic.
 
-## Planned stack and architecture
+## Prerequisites
 
-| Layer          | Choice                                                            |
-| -------------- | ----------------------------------------------------------------- |
-| Language       | TypeScript (strict) throughout                                    |
-| API            | Node.js + Express, ESM                                            |
-| Database       | PostgreSQL 16, explicit SQL migrations and transactions, `pg` pool |
-| Frontend       | React + Vite + TypeScript                                        |
-| Tests          | Vitest; integration tests against **real PostgreSQL**             |
-| Orchestration  | Docker Compose (db + api + web), npm workspaces monorepo          |
-| Deliberately absent | ORMs, queues, caches, microservices                          |
+- **Node.js 20+** (developed and verified on v24.15.0) with npm 11+
+- **Docker + Docker Compose** — one-command PostgreSQL + API (not available on the machine where Phase 1 was implemented, so Compose is written but unexecuted there)
+- No local PostgreSQL install is required when using Compose
 
-Core design decisions (rationale in [`AGENTS.md`](./AGENTS.md) §3 and the plan):
+## Quick start
 
-- **Money** is integer **paise** everywhere (`price_paise`, `total_paise`, `amount_paise`).
-- **Time** comes from the database clock only; `expires_at` is computed in SQL, and `expiresInSeconds` is computed from the DB clock when the response is sent.
-- **Availability** = physical stock − quantities held by *pending, unexpired* orders. Expired holds never count. Physical stock is only permanently reduced by a successful pickup claim.
-- **Reservations** lock product rows `FOR UPDATE` in deterministic (sorted) order inside one transaction — all lines or none.
-- **Idempotency** is database-enforced: `payment_events.event_id` is a primary key; events are inserted before any side effect.
-- **Signatures** are verified over the exact raw body bytes with constant-time comparison before any event data is trusted.
-- **Late payments / amount mismatches** go to `needs_review`, never auto-fulfillment (see policy below).
-- **Pickup** is one atomic `paid → picked_up` transition that decrements stock in the same transaction.
-- **Frontend countdown** is initialized from the server's remaining seconds and ticks on a monotonic clock; server-reported status is always authoritative.
+```bash
+cp .env.example .env            # local defaults; nothing to edit for a first run
+npm install
+docker compose up --build       # db + one-shot migrate/seed + api (port 3001)
+curl -s http://localhost:3001/health   # → {"status":"ok","database":"connected"}
+```
 
-## Planned directory structure
+Without Docker (any machine with Node + a reachable PostgreSQL):
+
+```bash
+cp .env.example .env            # point DATABASE_URL at your PostgreSQL
+npm install
+npm run migrate                 # applies apps/api/migrations/*.sql (idempotent)
+npm run seed                    # inserts 5 products (idempotent; never resets stock)
+npm run dev                     # API on http://localhost:3001
+npm run dev:web                 # web starter on http://localhost:5173 (proxies /health etc.)
+```
+
+## Environment configuration
+
+All variables are documented in [`.env.example`](./.env.example). The API validates them at startup with zod ([`apps/api/src/config.ts`](./apps/api/src/config.ts)) and **fails fast** with a message listing every problem — values are never echoed (they can contain secrets).
+
+| Variable                                                                | Purpose                                                          | Default (dev only)                                           |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------ |
+| `DATABASE_URL`                                                          | Application PostgreSQL connection string                         | `postgres://postgres:postgres@localhost:5432/pickup_counter` |
+| `TEST_DATABASE_URL`                                                     | Separate DB for integration tests (never defaults to the dev DB) | — (required for `npm test`)                                  |
+| `API_PORT`                                                              | Express listen port                                              | `3001`                                                       |
+| `NODE_ENV`                                                              | `development` \| `test` \| `production`                          | `development`                                                |
+| `HOLD_TTL_SECONDS`                                                      | Unpaid-order hold window                                         | `120`                                                        |
+| `WEBHOOK_SECRET`                                                        | HMAC-SHA256 shared secret for payment webhooks                   | `change-me-local-dev-secret` (dev only)                      |
+| `VITE_API_BASE_URL`                                                     | Frontend: API origin (used by the Vite dev proxy)                | `http://localhost:3001`                                      |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_PORT` | Compose `db` service settings                                    | `postgres` / `postgres` / `pickup_counter` / `5432`          |
+
+In **production** (`NODE_ENV=production`) `DATABASE_URL` and `WEBHOOK_SECRET` must be set explicitly, the secret must be ≥ 16 characters, and the dev placeholder is rejected. The webhook secret is server-side only — it never reaches the frontend (the web app talks same-origin through the Vite proxy).
+
+## Commands
+
+| Command                                 | What it does                                                                                             |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `npm install`                           | Install workspace dependencies (generates `package-lock.json`)                                           |
+| `npm run dev` / `npm run dev:web`       | API (watch mode) / web starter (Vite)                                                                    |
+| `npm run build`                         | Build both apps (`tsc` for the API, `tsc && vite build` for web)                                         |
+| `npm run typecheck`                     | Strict TypeScript across both workspaces                                                                 |
+| `npm run lint` / `npm run format:check` | ESLint 10 (typescript-eslint) / Prettier                                                                 |
+| `npm test`                              | Vitest: unit + real-PostgreSQL integration tests (`TEST_DATABASE_URL` required; fails loudly without it) |
+| `npm run migrate`                       | Apply pending SQL migrations (advisory-locked, checksummed)                                              |
+| `npm run seed`                          | Insert/refresh 5 products (never resets consumed stock)                                                  |
+| `docker compose up --build`             | PostgreSQL + one-shot migrate/seed + API                                                                 |
+| `docker compose down`                   | Stop (named volume keeps the data)                                                                       |
+
+## Architecture
 
 ```text
 pickup-counter/
-├── AGENTS.md                  ✅ present
-├── IMPLEMENTATION_PLAN.md     ✅ present
-├── ACCEPTANCE_CRITERIA.md     ✅ present
-├── README.md                  ✅ present (this file)
-├── AI_NOTES.md                ✅ present
-├── .env.example               ✅ present
-├── .gitignore                 ✅ present (pre-existing)
-├── package.json               ⬜ Phase 1 (npm workspaces root)
-├── package-lock.json          ⬜ Phase 1
-├── tsconfig.base.json         ⬜ Phase 1
-├── docker-compose.yml         ⬜ Phase 1
 ├── apps/
-│   ├── api/                   ⬜ Phase 1+
-│   │   ├── src/               app code (Express, config, errors, routes)
-│   │   ├── migrations/        numbered SQL migrations + runner
-│   │   ├── seeds/             ~5 snack products
-│   │   ├── scripts/           send-webhook signer (Phase 4)
-│   │   └── tests/             integration & concurrency tests (Phases 2–6)
-│   └── web/                   ⬜ Phase 7 (React + Vite customer screen)
-└── scripts/                   ⬜ helper scripts if needed
+│   ├── api/                  Express + TypeScript (ESM) + pg
+│   │   ├── migrations/       NNNN_name.sql, applied in order, recorded in schema_migrations
+│   │   ├── src/config.ts     zod-validated env, fail-fast, no value echoing
+│   │   ├── src/db/           pool factory, advisory-lock migration runner + CLI
+│   │   ├── src/seed/         idempotent seed + CLI
+│   │   ├── src/routes/       /health (more in Phases 2–5)
+│   │   └── tests/            config unit tests + real-PG migration integration tests
+│   └── web/                  React + Vite starter (Phase 7 builds the real UI)
+├── docker/init/              first-boot SQL: creates the integration-test database
+├── docker-compose.yml        db + one-shot init (migrate & seed) + api, health-gated
+└── (root configs)            tsconfig.base.json, eslint, prettier, vitest
 ```
 
-## Planned commands — **NOT YET AVAILABLE**
+Core decisions (rationale in [`AGENTS.md`](./AGENTS.md) §3):
 
-These will exist once the listed phase lands. Running them today fails; nothing here has been executed successfully.
+- **Money** is integer **paise** everywhere (`BIGINT` columns with CHECKs; no floats anywhere).
+- **Time** comes from the database clock only; `expires_at` is computed in SQL, and `expiresInSeconds` (Phase 2) will be computed from the DB clock at response time.
+- **Availability** (Phase 2) = physical stock − quantities held by _pending, unexpired_ orders. Expired holds never count. `stock_quantity` is only permanently reduced by a successful pickup claim — `CHECK (stock_quantity >= 0)` is the database-level backstop.
+- **Reservations** (Phase 2) will lock product rows `FOR UPDATE` in sorted order inside one transaction — all lines or none.
+- **Idempotency** is database-enforced: `payment_events.event_id` is a primary key; events are inserted before any side effect (Phase 4).
+- **Order state machine** is encoded in the schema: `status` CHECK over the five states plus coherence checks tying `paid_at` / `picked_up_at` / `needs_review_reason` to the state.
 
-| Command                                   | What it will do                              | Available in |
-| ----------------------------------------- | -------------------------------------------- | ------------ |
-| `cp .env.example .env`                    | Create local env config                      | now          |
-| `docker compose up -d db`                 | Start PostgreSQL                             | Phase 1      |
-| `npm install`                             | Install workspace dependencies               | Phase 1      |
-| `npm run -w apps/api migrate`             | Apply SQL migrations                         | Phase 1      |
-| `npm run -w apps/api seed`                | Seed snack products                          | Phase 1      |
-| `npm run typecheck` / `lint` / `format:check` | Strict TS, ESLint, Prettier              | Phase 1      |
-| `npm test`                                | Full test suite (real PostgreSQL)            | Phase 6      |
-| `npm run -w apps/api send-webhook -- …`   | Send a correctly signed payment event        | Phase 4      |
-| `docker compose up --build`               | One-command full startup (db + api + web)    | Phase 7      |
+### Schema (0001_init)
 
-## Assumptions
+- `products` — uuid PK, stable `key` (seed upsert target), `price_paise > 0`, `stock_quantity >= 0`
+- `orders` — five-state CHECK (`pending`, `paid`, `expired`, `needs_review`, `picked_up`), `total_paise`, DB-generated `expires_at`, state↔timestamp coherence CHECKs
+- `order_lines` — FKs to orders/products, `quantity > 0`, `unit_price_paise > 0`, unique `(order_id, product_id)`
+- `payment_events` — `event_id` PK (provider idempotency), payload JSONB, processing outcome, timestamps
 
-- Payments are simulated by an external provider that calls our webhook; the repo ships a **signing sender script** as the stand-in provider (the assignment's `npm run send-webhook`).
-- The shared webhook secret (`WEBHOOK_SECRET`) is provisioned out of band and is identical on both sides; `.env.example` carries only a local placeholder.
-- ~5 seeded products, integer-paise prices, single-currency, no tax/shipping.
-- "Locker claiming" is modeled as an authenticated-by-contract internal endpoint (`POST /orders/:id/pickup-claim`); real locker hardware/auth is out of scope.
-- Hold duration defaults to 120 s and is configurable via `HOLD_TTL_SECONDS`.
-- Expiration is handled lazily (on access) plus the availability formula — no background sweep job, for deterministic tests.
+**Recorded deviations and why:**
 
-## Key decisions and policies
-
-### Late-payment policy (conservative)
-
-If a **validly signed, correctly formed capture** arrives for an order whose hold already expired:
-
-- The order transitions to **`needs_review`** (reason `late_payment`) — it is **not** resurrected, **not** fulfilled, and its stock is **not** automatically restocked by the webhook.
-- The event and reconciliation data (expected vs. received amount, timestamps, current order state) are persisted in `payment_events`.
-- An **amount mismatch** behaves the same way (`needs_review`, reason `amount_mismatch`).
-- In production this is where a refund API call or a manual resolution queue would take over; this assignment stops at recording the state honestly.
-
-### Order state machine
-
-`pending → paid | expired | needs_review`, and `paid → picked_up`. `expired`, `picked_up`, and `needs_review` are terminal for automation — replays and late events never regress them.
+1. **`payment_events.order_id` has no foreign key.** The webhook must record events for orders we don't know (acceptance criterion C9) and the ledger must survive independently of order rows. Referential integrity is checked at processing time. (Amended in `IMPLEMENTATION_PLAN.md`.)
+2. **Pickup claim state lives on the order** (`status='picked_up'` + `picked_up_at`), not a separate claims table: the Phase 5 transaction makes the status flip and the stock decrement atomic, so the flip _is_ the exactly-once claim record.
+3. **Migrations are append-only, one transaction per file**, serialized by `pg_advisory_lock`, with SHA-256 checksums that detect edits to applied files. Limitation: no rollback files, and a single file cannot contain statements PostgreSQL forbids in transactions (e.g. `CREATE INDEX CONCURRENTLY`).
+4. **Seed upserts by fixed UUID and never rewrites `stock_quantity`**, so re-seeding cannot silently reset inventory consumed by real orders (verified).
 
 ## Tests
 
-Planned in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) Phase 6, proven per [`ACCEPTANCE_CRITERIA.md`](./ACCEPTANCE_CRITERIA.md), all against real PostgreSQL:
+Run with a real PostgreSQL: `TEST_DATABASE_URL` must point at a **disposable** database (Compose creates `pickup_counter_test` on first boot; integration tests `DROP SCHEMA` inside it). There is no mock fallback — without a reachable database the suite fails loudly.
 
-1. **Last-two-units race** — 10 concurrent customers, exactly 2 reservations succeed, all others fail cleanly, nothing oversold.
-2. **Webhook replay** — the same signed event delivered twice processes once.
-3. **Concurrent pickup claims** — exactly one success and one `409`, stock deducted exactly once.
+Currently implemented (`apps/api/tests/`):
 
-**No test exists or has been run yet. No coverage claim is made.**
+- `config.test.ts` — 13 unit tests for env validation (defaults, production requirements, placeholder-secret rejection, no-password-echo, bounds, multi-issue reporting).
+- `migrations.integration.test.ts` — 4 integration tests on real PostgreSQL: fresh-database apply, idempotent second run, expected tables/constraints/indexes (including all-`BIGINT` money columns and the stock CHECK), and DB-level state-machine enforcement.
+
+The three mandatory concurrency scenarios (last-two-units race, webhook replay, concurrent pickup claims) belong to Phases 4–6 and are **not yet implemented**.
+
+## Late-payment policy (conservative)
+
+If a validly signed capture arrives for an order whose hold already expired, or the amount doesn't match the order total: the order goes to **`needs_review`** with full reconciliation data (expected vs. received amount, timestamps, raw payload) — never auto-fulfillment, never automatic restocking. A production system would now call the provider's refund API or open a manual resolution queue. Details: [`ACCEPTANCE_CRITERIA.md`](./ACCEPTANCE_CRITERIA.md) C7/C11.
+
+## Verification status (honest)
+
+Executed on the development machine (Windows, Node v24.15.0, npm 11.12.1), against **real PostgreSQL 18.4** run from downloaded official binaries on `127.0.0.1:5433` (Docker unavailable):
+
+| Check                                                   | Result                                                                                                                                                                     |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm install` (lockfile generated, `npm audit`)         | ✅ 0 vulnerabilities after dev-toolchain version bumps (vitest 5, vite 6.4.5, eslint 10)                                                                                   |
+| `npm run typecheck` / `lint` / `format:check` / `build` | ✅ all exit 0 (API via `tsc`, web via `tsc && vite build`)                                                                                                                 |
+| `npm test`                                              | ✅ 17/17 (13 unit + 4 real-PG integration)                                                                                                                                 |
+| `npm run migrate` × 2                                   | ✅ run 1 applies `0001_init`; run 2 reports up to date                                                                                                                     |
+| Broken migration (scratch check)                        | ✅ fails naming the file, full rollback, no history row                                                                                                                    |
+| Concurrent migration runners (scratch check)            | ✅ exactly one applies; the other waits on the advisory lock                                                                                                               |
+| `npm run seed` × 2                                      | ✅ run 1 inserts 5; after simulating consumed stock (=3), run 2 refreshes 5 / inserts 0, stock stays 3                                                                     |
+| `GET /health` with DB up / killed / restarted           | ✅ 200 → 503 (generic, credential-free body) → 200                                                                                                                         |
+| Production boot with empty env                          | ✅ exits 1 listing both missing variables                                                                                                                                  |
+| Data persistence across database restart                | ✅ 5 products and the consumed-stock row intact                                                                                                                            |
+| `docker compose up --build`                             | ⚠️ **NOT RUN — Docker unavailable on this machine.** File written and reviewed; must be verified on a Docker-capable machine                                               |
+| Fresh-clone audit                                       | ⚠️ Deferred to Phase 8 (per plan)                                                                                                                                          |
+| Graceful-shutdown signal handling                       | ⚠️ Implemented (SIGINT/SIGTERM → close server + pool, 10 s force-exit); live signal behavior **not verified** — Windows does not deliver POSIX signals to native processes |
 
 ## Limitations (current and known)
 
-- The repository has no application code as of this Phase 0 baseline.
-- Planned scope omits authentication/authorization, refunds automation, admin UI, and observability beyond a health endpoint — deliberately, per the assignment.
-- Single-node assumption: correctness relies on PostgreSQL row locks; no distributed coordination exists or is planned.
+- Business endpoints (products, orders, webhook, pickup) do not exist yet — Phases 2–5.
+- The customer UI is a placeholder; the real storefront is Phase 7.
+- Compose is unverified on this machine (no Docker). The schema, migrations, seed and health behavior were verified against real PostgreSQL 18.4 rather than the Compose `postgres:16-alpine` image — same protocol/SQL surface, but the image itself still needs its first run.
+- No authentication/authorization, refunds automation, admin UI, or observability beyond `/health` — deliberately out of assignment scope.
 
 ## Future improvements
 
@@ -136,10 +167,10 @@ Planned in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) Phase 6, proven 
 
 ## Repository documentation
 
-| File                                            | Purpose                                                        |
-| ----------------------------------------------- | -------------------------------------------------------------- |
-| [`AGENTS.md`](./AGENTS.md)                      | Invariants and rules every coding agent must follow            |
+| File                                                 | Purpose                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------- |
+| [`AGENTS.md`](./AGENTS.md)                           | Invariants and rules every coding agent must follow        |
 | [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) | Phase-by-phase build plan with exit criteria               |
 | [`ACCEPTANCE_CRITERIA.md`](./ACCEPTANCE_CRITERIA.md) | Every requirement as an individually testable criterion    |
-| [`AI_NOTES.md`](./AI_NOTES.md)                  | Honest record of AI usage, prompts, mistakes, verification    |
-| [`.env.example`](./.env.example)                | Environment variable template (placeholders only)              |
+| [`AI_NOTES.md`](./AI_NOTES.md)                       | Honest record of AI usage, prompts, mistakes, verification |
+| [`.env.example`](./.env.example)                     | Environment variable template (placeholders only)          |
