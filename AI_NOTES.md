@@ -3,7 +3,7 @@
 Honest record of how AI was used while building this project.
 **Rule: never fabricate.** Only record what actually happened, when it happened. Fields stay `PENDING` until real experience fills them. Recording a fabricated tool, prompt, mistake, or verification is itself an academic-integrity violation.
 
-_Last updated: Phase 2 (catalog + order reservations)._
+_Last updated: Phase 5 (atomic pickup claims)._
 
 ---
 
@@ -62,6 +62,12 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Mistake 2 (real correctness bugs in the inherited webhook code):** (a) The handler SELECTed/UPDATEed `payment_events.provider_status` and read `received_amount_paise` — columns that do not exist in `0001_init.sql`, so every event would have failed at runtime with "column does not exist"; `status` and `amount_paise` already carry those values. (b) Late-payment detection compared `expires_at <= new Date()` (a Node clock — a direct violation of invariant I2) and then attempted a `pending → expired → needs_review` double-flip, where the second guarded `UPDATE … WHERE status = 'pending'` could never match, silently leaving the order `expired` instead of `needs_review`. (c) `app.ts` mounted `express.json()` before the raw parser for the webhook path, which would have parsed-and-reserialized the body before the HMAC ran (violating I8).
 - **Detected by:** Reading `0001_init.sql` and the webhook source side by side during the audit (schema mismatch and `new Date()` are inspection catches), and by the raw-bytes test `T-WH-02` (re-formatted canonical JSON must be rejected) once the middleware order was corrected.
 - **Resolution:** Removed the non-existent column references; replaced the late-payment branch with a single DB-clock `needs_review('late_payment')` transition guarded by `FOR UPDATE`; moved `express.raw()` for `/payments/webhook` ahead of the global `express.json()`. All verified by the 14-test webhook suite plus a 10× soak on real PostgreSQL.
+
+### Later real mistakes (Phase 5)
+
+- **Mistake (self-contradictory claim transaction):** The first `claimOrder` implementation ran the lazy `pending → expired` flip (the same guarded UPDATE used by `GET /orders/:id`) inside the claim transaction, and its doc comment claimed the endpoint was a new "observation point" that materializes expiry. But every rejected claim is designed to `ROLLBACK` — so the flip was always undone, and the endpoint could answer `409 ORDER_EXPIRED` while the stored row still said `pending`. The design contradicted its own rollback semantics.
+- **Detected by:** The AI-written test T-PICK-02 (`apps/api/tests/pickup.integration.test.ts`): the claim itself correctly returned `409 ORDER_EXPIRED`, but the next assertion — that the row had been materialized to `expired` — failed with `AssertionError: expected 'pending' to be 'expired'`. The test refused the inconsistency instead of being relaxed to accept `pending`.
+- **Resolution:** Rejected claims are now strictly read-only: the locking `SELECT … FOR UPDATE` carries `(expires_at <= now()) AS is_expired` (database clock, I2) and the eligibility gate uses it directly — `expired`/stale-`pending` → `ORDER_EXPIRED` with zero writes. Expiry materialization stays with the two documented observation points. T-PICK-02 now asserts the row is still `pending` after the rejected claim and flips to `expired` at the very next `GET`, which proves both the read-only rejection and the lifecycle behavior.
 
 ## 5. Human verification performed
 

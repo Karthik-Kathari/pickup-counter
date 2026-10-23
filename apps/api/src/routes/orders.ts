@@ -423,6 +423,187 @@ export async function getOrder(pool: Pool, rawId: string): Promise<OrderStatusRe
   return response;
 }
 
+/**
+ * POST /orders/:id/pickup-claim — the atomic pickup claim (I10).
+ *
+ * One PostgreSQL transaction on a dedicated client, in this order:
+ *
+ *   1. `SELECT …, (expires_at <= now()) AS is_expired … FOR UPDATE` on the
+ *      order row — THE serialization point. Concurrent claimants queue on
+ *      this row lock; under READ COMMITTED the loser re-reads the winner's
+ *      committed row, so exactly one transaction can ever observe
+ *      `status = 'paid'`.
+ *   2. Eligibility gate, evaluated on that single locked snapshot: only
+ *      `paid` proceeds — `picked_up` → 409 ORDER_ALREADY_CLAIMED, `expired`
+ *      or a `pending` hold whose deadline already passed (database clock,
+ *      I2) → 409 ORDER_EXPIRED, `pending` / `needs_review` → 409
+ *      ORDER_NOT_PAID, unknown id → 404. Every rejection throws → ROLLBACK,
+ *      so a rejected or losing claim writes NOTHING — including the lazy
+ *      `pending → expired` materialization, which stays with the two
+ *      established observation points (order creation and GET /orders/:id).
+ *   3. order_lines are immutable after creation, so they are read unlocked,
+ *      then every product row is locked `FOR UPDATE` in ascending id order
+ *      (identical lock order to order creation → no deadlocks). A fresh
+ *      snapshot after the locks checks physical stock against the claim:
+ *      the I4 availability formula excludes already-`paid` orders, so two
+ *      paid orders can cover the same units — the shortfall is answered
+ *      deterministically with 409 INSUFFICIENT_STOCK and nothing written.
+ *   4. Guarded flip `paid → picked_up` (we hold the row lock, so it matches
+ *      exactly once even under concurrent claims or retry storms), then the
+ *      permanent decrement — one statement, one row per product, guarded by
+ *      `AND stock_quantity >= claim_quantity` with the schema CHECK
+ *      (`stock_quantity >= 0`) as backstop. A rowCount that does not equal
+ *      the product count throws: the flip and the deduction succeed
+ *      together or not at all (I5).
+ *
+ * COMMIT, then the response is re-read through getOrder() so a successful
+ * claim returns byte-identical contract data to GET /orders/:id.
+ */
+export async function claimOrder(pool: Pool, rawId: string): Promise<OrderStatusResponse> {
+  const parsed = orderStatusSchema.safeParse({ id: rawId });
+  if (!parsed.success) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'Request parameters failed validation',
+      parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+    );
+  }
+  const orderId = parsed.data.id;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Step 1 — lock the order row; this single locked snapshot decides the
+    // winner (I10) and carries the DB-clock deadline (I2) for the gate.
+    const orderResult = await client.query<{ status: string; is_expired: boolean }>(
+      `SELECT status, (expires_at <= now()) AS is_expired
+         FROM orders
+        WHERE id = $1
+        FOR UPDATE`,
+      [orderId],
+    );
+    const order = orderResult.rows[0];
+    if (order === undefined) {
+      throw new HttpError(404, 'ORDER_NOT_FOUND', 'Order not found');
+    }
+    if (order.status === 'picked_up') {
+      throw new HttpError(409, 'ORDER_ALREADY_CLAIMED', 'Order has already been picked up');
+    }
+    if (order.status === 'expired' || (order.status === 'pending' && order.is_expired)) {
+      throw new HttpError(
+        409,
+        'ORDER_EXPIRED',
+        'Order hold expired before payment; it cannot be picked up',
+      );
+    }
+    if (order.status !== 'paid') {
+      throw new HttpError(
+        409,
+        'ORDER_NOT_PAID',
+        `Order is in state "${order.status}"; only paid orders can be claimed`,
+      );
+    }
+
+    // Step 2 — immutable lines, product row locks in ascending id order,
+    // then a fresh-snapshot physical-stock check while the locks are held.
+    const lineResult = await client.query<{ product_id: string; quantity: number }>(
+      'SELECT product_id, quantity FROM order_lines WHERE order_id = $1 ORDER BY product_id',
+      [orderId],
+    );
+    const lines = lineResult.rows;
+    const productIds = [...new Set(lines.map((line) => line.product_id))];
+
+    if (productIds.length > 0) {
+      const lockResult = await client.query<{ id: string }>(
+        `SELECT id
+           FROM products
+          WHERE id = ANY ($1::uuid[])
+          ORDER BY id
+          FOR UPDATE`,
+        [productIds],
+      );
+      if (lockResult.rows.length !== productIds.length) {
+        throw new Error('order references a product row that does not exist');
+      }
+
+      const needed = new Map<string, number>();
+      for (const line of lines) {
+        needed.set(line.product_id, (needed.get(line.product_id) ?? 0) + line.quantity);
+      }
+
+      const stockResult = await client.query<{ id: string; stock_quantity: number }>(
+        `SELECT id, stock_quantity
+           FROM products
+          WHERE id = ANY ($1::uuid[])
+          ORDER BY id`,
+        [productIds],
+      );
+      const shortages = stockResult.rows.flatMap((row) => {
+        const required = needed.get(row.id) ?? 0;
+        if (row.stock_quantity >= required) {
+          return [];
+        }
+        return [{ productId: row.id, required, available: row.stock_quantity }];
+      });
+      if (shortages.length > 0) {
+        throw new HttpError(
+          409,
+          'INSUFFICIENT_STOCK',
+          'Physical stock cannot cover this paid order; nothing was deducted',
+          { shortages },
+        );
+      }
+    }
+
+    // Step 3 — flip first, so the deduction is guarded by the transition.
+    const flipped = await client.query(
+      `UPDATE orders
+          SET status = 'picked_up',
+              picked_up_at = now()
+        WHERE id = $1
+          AND status = 'paid'`,
+      [orderId],
+    );
+    if ((flipped.rowCount ?? 0) !== 1) {
+      throw new Error('paid → picked_up flip did not match exactly one row under row lock');
+    }
+
+    // Step 4 — permanent, exactly-once deduction (I5), never negative.
+    if (productIds.length > 0) {
+      const deducted = await client.query(
+        `UPDATE products p
+            SET stock_quantity = p.stock_quantity - sub.claim_quantity,
+                updated_at = now()
+           FROM (
+             SELECT product_id, SUM(quantity)::int AS claim_quantity
+               FROM order_lines
+              WHERE order_id = $1
+              GROUP BY product_id
+           ) sub
+          WHERE p.id = sub.product_id
+            AND p.stock_quantity >= sub.claim_quantity`,
+        [orderId],
+      );
+      if ((deducted.rowCount ?? 0) !== productIds.length) {
+        throw new Error('inventory deduction did not affect exactly one row per product');
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  // The order is terminal (`picked_up`), so this re-read only echoes the
+  // state just committed — same shape and fields as GET /orders/:id.
+  return getOrder(pool, orderId);
+}
+
 export function createOrdersRouter(pool: Pool, holdTtlSeconds: number): Router {
   const router = Router();
 
@@ -439,6 +620,16 @@ export function createOrdersRouter(pool: Pool, holdTtlSeconds: number): Router {
     try {
       const order = await createOrder(pool, holdTtlSeconds, req.body);
       res.status(201).location(`/orders/${order.id}`).json({ order });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // The pickup claim takes no body: the path parameter is the entire input.
+  router.post('/orders/:id/pickup-claim', async (req, res, next) => {
+    try {
+      const order = await claimOrder(pool, String(req.params.id));
+      res.json({ order });
     } catch (error) {
       next(error);
     }
