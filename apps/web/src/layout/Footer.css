@@ -1,0 +1,25 @@
+.site-footer {
+  margin-top: auto;
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.site-footer__line {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.site-footer__scope {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+  font-style: italic;
+}
+
+@media (max-width: 480px) {
+  .site-footer {
+    padding: var(--space-3) var(--space-4);
+  }
+}

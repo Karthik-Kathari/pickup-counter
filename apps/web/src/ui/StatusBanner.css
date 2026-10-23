@@ -1,0 +1,118 @@
+.status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid transparent;
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-relaxed);
+}
+
+.status-banner__glyph {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: var(--weight-bold);
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid currentColor;
+}
+
+.status-banner__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.status-banner--pending {
+  background: var(--info-soft);
+  border-color: #cfe0ff;
+  color: #0a2a5c;
+}
+
+.status-banner--paid {
+  background: var(--success-soft);
+  border-color: #c4e6cf;
+  color: #0e4a2f;
+}
+
+.status-banner--picked_up {
+  background: var(--success-soft);
+  border-color: #c4e6cf;
+  color: #0e4a2f;
+}
+
+.status-banner--expired {
+  background: var(--warning-soft);
+  border-color: #f0d9a8;
+  color: #6f480f;
+}
+
+.status-banner--review {
+  background: var(--warning-soft);
+  border-color: #f0d9a8;
+  color: #6f480f;
+}
+
+.status-banner--error {
+  background: var(--error-soft);
+  border-color: #f0c9c3;
+  color: #7e261e;
+}
+
+.status-banner--info {
+  background: var(--info-soft);
+  border-color: #cfe0ff;
+  color: #0a2a5c;
+}
+
+.status-banner__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.status-banner__title {
+  font-weight: var(--weight-semibold);
+  color: inherit;
+}
+
+.status-banner__message {
+  flex: 1 1 auto;
+  min-width: 220px;
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.status-banner__action {
+  align-self: flex-start;
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+@media (max-width: 480px) {
+  .status-banner__body {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+  }
+
+  .status-banner__message {
+    min-width: 0;
+  }
+}
+
+.status-banner strong {
+  font-weight: var(--weight-semibold);
+}

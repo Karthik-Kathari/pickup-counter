@@ -1,0 +1,89 @@
+.webhook-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.webhook-panel__title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+
+.webhook-panel__intro {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: var(--leading-relaxed);
+}
+
+.webhook-panel__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.webhook-panel__code {
+  margin: 0;
+  padding: var(--space-4);
+  background: #0f172a;
+  color: #e6edf3;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre;
+  word-break: normal;
+  word-spacing: normal;
+  tab-size: 4;
+  -webkit-overflow-scrolling: touch;
+}
+
+.webhook-panel__code code {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+
+.webhook-panel__code-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.webhook-panel__code-actions button {
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: var(--space-1) var(--space-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+
+.webhook-panel__code-actions button:hover {
+  color: var(--accent);
+}
+
+.webhook-panel__copy[aria-label='Copy payment command']:hover {
+  color: var(--accent);
+}
+
+.webhook-panel__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  line-height: var(--leading-relaxed);
+}
+
+@media (max-width: 430px) {
+  .webhook-panel__code {
+    font-size: var(--text-xs);
+    padding: var(--space-3);
+  }
+}

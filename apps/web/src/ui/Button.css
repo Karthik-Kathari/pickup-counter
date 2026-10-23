@@ -1,0 +1,207 @@
+.btn {
+  --btn-bg: var(--surface);
+  --btn-border: var(--border-strong);
+  --btn-text: var(--text);
+  --btn-shadow: none;
+
+  appearance: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-family: var(--font);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--btn-bg);
+  border-color: var(--btn-border);
+  color: var(--btn-text);
+  box-shadow: var(--btn-shadow);
+  letter-spacing: 0.01em;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+  user-select: none;
+  white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btn::before {
+  content: '';
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-left: calc(1em * -1);
+}
+
+.btn--primary {
+  --btn-bg: var(--accent);
+  --btn-border: var(--accent);
+  --btn-text: var(--accent-text);
+  --btn-shadow: 0 1px 2px rgba(26, 110, 255, 0.25);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: 0 2px 6px rgba(26, 110, 255, 0.35);
+  transform: translateY(-1px);
+}
+
+.btn--primary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(26, 110, 255, 0.25);
+}
+
+.btn--secondary {
+  --btn-bg: var(--surface);
+  --btn-border: var(--border-strong);
+  --btn-text: var(--text);
+  --btn-shadow: var(--shadow-sm);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.btn--secondary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn--ghost {
+  --btn-bg: transparent;
+  --btn-border: transparent;
+  --btn-text: var(--accent);
+  --btn-shadow: none;
+  background: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.btn--ghost:active:not(:disabled) {
+  background: #d6e6fe;
+}
+
+.btn--danger {
+  --btn-bg: var(--error);
+  --btn-border: var(--error);
+  --btn-text: #ffffff;
+  --btn-shadow: 0 1px 2px rgba(192, 57, 43, 0.25);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #a93226;
+  border-color: #a93226;
+  box-shadow: 0 2px 6px rgba(192, 57, 43, 0.35);
+  transform: translateY(-1px);
+}
+
+.btn--danger:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(192, 57, 43, 0.25);
+}
+
+.btn--sm {
+  height: 32px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}
+
+.btn--md {
+  height: 40px;
+  padding: 0 var(--space-4);
+  font-size: var(--text-base);
+}
+
+.btn--lg {
+  height: 48px;
+  padding: 0 var(--space-5);
+  font-size: var(--text-lg);
+  border-radius: var(--radius-md);
+}
+
+.btn--full {
+  width: 100%;
+}
+
+.btn--loading {
+  pointer-events: none;
+}
+
+.btn__content {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.btn__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn__spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn__spinner {
+    animation-duration: 1ms;
+  }
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn--secondary:disabled {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text-soft);
+}
+
+.btn--ghost:disabled {
+  color: var(--text-soft);
+  background: transparent;
+}
+
+.btn--primary:disabled {
+  background: #9bb9f2;
+  border-color: #9bb9f2;
+  color: #ffffff;
+}

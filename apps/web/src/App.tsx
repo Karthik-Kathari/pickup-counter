@@ -1,26 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-/**
- * Customer screen (acceptance criteria E1–E6).
- *
- * Design rules that come straight from AGENTS.md:
- *  - I1: money is integer paise everywhere; display formatting is integer
- *    arithmetic only (no float money math). The placed order always shows
- *    the SERVER's totalPaise, never a client-side sum (E2).
- *  - I12/E5: the countdown initializes from the server's expiresInSeconds
- *    and ticks by measuring elapsed monotonic time (performance.now()
- *    deltas), never by subtracting Date.now() from a wall-clock instant; it
- *    re-syncs on every poll response. Shifting the OS clock cannot make it
- *    jump.
- *  - E6: the displayed status is ALWAYS the server's reported status. The
- *    timer never decides payment success or expiry — when it reaches 00:00
- *    the UI keeps waiting for the server's own verdict.
- *  - E4: polling stops the moment the server reports a non-pending status.
- *
- * All requests use relative URLs: the Vite dev server proxies API paths in
- * development, nginx proxies them in Docker — same origin, no CORS, and the
- * webhook secret never reaches the browser.
- */
+import { Header, Footer } from './layout';
+import { Catalog, CartPanel, OrderSummary, WebhookPanel } from './components';
+import Button from './ui/Button';
+import StatusBanner from './ui/StatusBanner';
+
+import './ui/index.css';
+import './layout/index.css';
+import './components/Component.css';
+import './App.css';
+
+/** ---------- types ---------- */
 
 interface Product {
   id: string;
@@ -55,12 +45,7 @@ interface ErrorEnvelope {
   error?: { code?: string; message?: string; details?: unknown };
 }
 
-/** Integer-only paise → display string (no floating-point money math, I1). */
-function formatPaise(paise: number): string {
-  const rupees = Math.floor(paise / 100);
-  const rest = paise % 100;
-  return `₹${rupees.toString()}.${String(rest).padStart(2, '0')}`;
-}
+/** ---------- helpers ---------- */
 
 function formatCountdown(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
@@ -68,7 +53,6 @@ function formatCountdown(totalSeconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-/** Render the API's standard error envelope as one readable line (E: honest messages). */
 function describeError(status: number, body: ErrorEnvelope): string {
   const code = body.error?.code ?? `HTTP_${status}`;
   const message = body.error?.message ?? 'Unexpected response from the API';
@@ -92,6 +76,25 @@ function describeError(status: number, body: ErrorEnvelope): string {
 
 type Screen = 'shop' | 'order';
 
+/** ---------- component ---------- */
+
+function formatDateTime(iso: string): string {
+  try {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return iso;
+    return date.toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
 export default function App(): React.ReactElement {
   const [products, setProducts] = useState<Product[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -106,8 +109,6 @@ export default function App(): React.ReactElement {
   const [claiming, setClaiming] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // Monotonic countdown anchor (I12/E5): seconds as last reported by the
-  // server, anchored to a performance.now() reading. Never a wall clock.
   const countdownAnchor = useRef<{ seconds: number; at: number }>({ seconds: 0, at: 0 });
 
   const loadCatalog = useCallback(async () => {
@@ -130,24 +131,25 @@ export default function App(): React.ReactElement {
     void loadCatalog();
   }, [loadCatalog]);
 
-  // Tick the countdown from monotonic elapsed time only.
+  // Monotonic countdown — anchored from server expiresInSeconds, elapsed from performance.now().
   useEffect(() => {
     if (screen !== 'order' || order?.status !== 'pending') {
       return;
     }
+
     const timer = window.setInterval(() => {
       const anchor = countdownAnchor.current;
       const elapsedSeconds = (performance.now() - anchor.at) / 1000;
       const remaining = Math.max(Math.floor(anchor.seconds - elapsedSeconds), 0);
       setCountdown(remaining);
     }, 250);
+
     return () => window.clearInterval(timer);
   }, [screen, order?.status]);
 
   const applyServerOrder = useCallback((next: Order) => {
     setOrder(next);
     if (next.status === 'pending' && typeof next.expiresInSeconds === 'number') {
-      // Re-sync the monotonic anchor on every server response (I12).
       countdownAnchor.current = { seconds: next.expiresInSeconds, at: performance.now() };
       setCountdown(next.expiresInSeconds);
     } else {
@@ -155,38 +157,40 @@ export default function App(): React.ReactElement {
     }
   }, []);
 
-  // Poll the server while the order is pending; STOP on any other status (E4).
+  // Poll the server while pending; stop on any terminal status (E4).
   useEffect(() => {
     if (screen !== 'order' || order === null || order.status !== 'pending') {
       return;
     }
+
     const orderId = order.id;
     let cancelled = false;
 
-    const poll = async (): Promise<void> => {
+    const poll = async () => {
       try {
         const response = await fetch(`/orders/${orderId}`);
         if (!response.ok || cancelled) {
-          return; // transient failure: keep waiting for the server, never guess
+          return;
         }
         const json = (await response.json()) as { order: Order };
         if (!cancelled) {
           applyServerOrder(json.order);
         }
       } catch {
-        // Network hiccup: keep polling; status never changes client-side.
+        // keep polling; never infer status client-side
       }
     };
 
     void poll();
     const interval = window.setInterval(() => void poll(), 2000);
+
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
   }, [screen, order?.id, order?.status, applyServerOrder]);
 
-  const adjustQuantity = (productId: string, delta: number, availableUnits: number): void => {
+  const adjustQuantity = useCallback((productId: string, delta: number, availableUnits: number) => {
     setCart((current) => {
       const next = Math.min(Math.max((current[productId] ?? 0) + delta, 0), availableUnits);
       const updated = { ...current };
@@ -197,9 +201,9 @@ export default function App(): React.ReactElement {
       }
       return updated;
     });
-  };
+  }, []);
 
-  const placeOrder = async (): Promise<void> => {
+  const placeOrder = async () => {
     setPlacing(true);
     setOrderError(null);
     try {
@@ -215,16 +219,15 @@ export default function App(): React.ReactElement {
       const json = (await response.json().catch(() => ({}))) as ErrorEnvelope & { order?: Order };
       if (!response.ok || json.order === undefined) {
         setOrderError(describeError(response.status, json));
-        // Rejections usually mean availability moved — refresh the catalog so
-        // the displayed quantities follow the server, not the stale snapshot.
         void loadCatalog();
         return;
       }
       setCart({});
       setActionError(null);
+      setOrderError(null);
       applyServerOrder(json.order);
       setScreen('order');
-      void loadCatalog(); // availability changed everywhere
+      void loadCatalog();
     } catch {
       setOrderError('Network error — no order was created');
     } finally {
@@ -232,7 +235,7 @@ export default function App(): React.ReactElement {
     }
   };
 
-  const claimPickup = async (): Promise<void> => {
+  const claimPickup = async () => {
     if (order === null) {
       return;
     }
@@ -247,8 +250,6 @@ export default function App(): React.ReactElement {
         return;
       }
       setActionError(describeError(response.status, json));
-      // The server is authoritative (E6): re-read the real state after a
-      // failed claim (e.g. already claimed in another tab).
       const fresh = await fetch(`/orders/${order.id}`);
       if (fresh.ok) {
         const freshJson = (await fresh.json()) as { order: Order };
@@ -261,7 +262,18 @@ export default function App(): React.ReactElement {
     }
   };
 
-  const backToCatalog = (): void => {
+  const cartCount = Object.values(cart).reduce((sum, quantity) => sum + quantity, 0);
+
+  const cartItems = products
+    .filter((product) => cart[product.id] !== undefined)
+    .map((product) => ({
+      productId: product.id,
+      name: product.name,
+      quantity: cart[product.id]!,
+      pricePaise: product.pricePaise,
+    }));
+
+  const backToCatalog = () => {
     setScreen('shop');
     setOrder(null);
     setCountdown(null);
@@ -270,227 +282,180 @@ export default function App(): React.ReactElement {
     void loadCatalog();
   };
 
-  const cartCount = Object.values(cart).reduce((sum, quantity) => sum + quantity, 0);
-
   return (
-    <main className="container">
-      <header className="app-header">
-        <div>
-          <h1>Pickup Counter</h1>
-          <p className="tagline">Self-service snack pickup — reserve, pay, collect.</p>
-        </div>
-        {screen === 'shop' && cartCount > 0 && (
-          <span className="cart-badge">{cartCount} in cart</span>
-        )}
-      </header>
+    <div className="page">
+      <Header
+        brand="Pickup Counter"
+        tagline="Self-service snack pickup — reserve, pay, collect."
+        cartCount={cartCount}
+      />
 
-      {screen === 'shop' && (
-        <section aria-label="Catalog">
-          <h2>Catalog</h2>
-          {catalogLoading && <p className="muted">Loading products…</p>}
-          {catalogError !== null && <p className="error-banner">{catalogError}</p>}
-          <ul className="product-list">
-            {products.map((product) => {
-              const inCart = cart[product.id] ?? 0;
-              const soldOut = product.availableUnits === 0;
-              return (
-                <li key={product.id} className="product-row">
-                  <div>
-                    <strong>{product.name}</strong>
-                    <div className="muted">
-                      {formatPaise(product.pricePaise)} ·{' '}
-                      {soldOut ? 'sold out' : `${product.availableUnits} available`}
-                    </div>
+      <main className="page__main">
+        <div className="page__section">
+          {screen === 'shop' && (
+            <div className="shop-layout">
+              <div className="shop-layout__main">
+                <Catalog
+                  products={products}
+                  loading={catalogLoading}
+                  error={catalogError}
+                  cart={cart}
+                  onAdd={(id: string) =>
+                    adjustQuantity(id, 1, products.find((p) => p.id === id)?.availableUnits ?? 0)
+                  }
+                  onDecrement={(id: string) =>
+                    adjustQuantity(id, -1, products.find((p) => p.id === id)?.availableUnits ?? 0)
+                  }
+                  onRemove={(id: string) =>
+                    adjustQuantity(
+                      id,
+                      -(cart[id] ?? 0),
+                      products.find((p) => p.id === id)?.availableUnits ?? 0,
+                    )
+                  }
+                />
+              </div>
+              <aside className="shop-layout__aside" aria-label="Your cart">
+                <div className="cart-card">
+                  <CartPanel
+                    items={cartItems}
+                    cartCount={cartCount}
+                    placing={placing}
+                    error={orderError}
+                    onPlaceOrder={placeOrder}
+                    onRemoveItem={(id: string) =>
+                      adjustQuantity(
+                        id,
+                        -(cart[id] ?? 0),
+                        products.find((p) => p.id === id)?.availableUnits ?? 0,
+                      )
+                    }
+                  />
+                </div>
+              </aside>
+            </div>
+          )}
+
+          {screen === 'order' && order !== null && (
+            <>
+              <div className="order-back">
+                <Button variant="ghost" onClick={backToCatalog}>
+                  ← Back to catalog
+                </Button>
+              </div>
+
+              <div className="order-layout">
+                <div className="order-layout__summary">
+                  <div className="order-summary-card">
+                    <OrderSummary
+                      orderId={order.id}
+                      items={order.items}
+                      totalPaise={order.totalPaise}
+                      paidAt={order.paidAt}
+                      pickedUpAt={order.pickedUpAt}
+                    />
                   </div>
-                  {soldOut ? (
-                    <span className="muted">Sold out</span>
-                  ) : inCart > 0 ? (
-                    <div className="qty">
-                      <button
-                        type="button"
-                        aria-label={`Remove one ${product.name}`}
-                        onClick={() => adjustQuantity(product.id, -1, product.availableUnits)}
-                      >
-                        −
-                      </button>
-                      <span>{inCart}</span>
-                      <button
-                        type="button"
-                        aria-label={`Add one ${product.name}`}
-                        onClick={() => adjustQuantity(product.id, 1, product.availableUnits)}
-                        disabled={inCart >= product.availableUnits}
-                      >
-                        +
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="primary"
-                      onClick={() => adjustQuantity(product.id, 1, product.availableUnits)}
-                    >
-                      Add
-                    </button>
+                </div>
+
+                <div className="order-main">
+                  {order.status === 'pending' && (
+                    <>
+                      <div className="order-countdown-row">
+                        <StatusBanner variant="pending" title="Awaiting payment" code="PENDING">
+                          {countdown === 0
+                            ? 'Time is up — waiting for the server to confirm the hold…'
+                            : `The hold keeps your items until the timer runs out.`}
+                        </StatusBanner>
+                      </div>
+
+                      <div className="order-countdown-block">
+                        <span className="countdown">
+                          {countdown !== null ? formatCountdown(countdown) : '…'}
+                        </span>
+                        <p className="order-poll-note">
+                          Polling the server every 2 s for the payment result…
+                        </p>
+                      </div>
+
+                      <WebhookPanel orderId={order.id} amountPaise={order.totalPaise} />
+
+                      <div className="order-timer-note">
+                        The displayed status always comes straight from the server; the timer above
+                        never decides the outcome.
+                      </div>
+                    </>
                   )}
-                </li>
-              );
-            })}
-          </ul>
 
-          <div className="panel">
-            <h2>Your order</h2>
-            {cartCount === 0 ? (
-              <p className="muted">Cart is empty — add something above.</p>
-            ) : (
-              <>
-                <ul className="cart-list">
-                  {products
-                    .filter((product) => cart[product.id] !== undefined)
-                    .map((product) => (
-                      <li key={product.id}>
-                        {product.name} × {cart[product.id]}{' '}
-                        <span className="muted">(@ {formatPaise(product.pricePaise)} each)</span>
-                        <button
-                          type="button"
-                          className="link"
-                          onClick={() =>
-                            adjustQuantity(
-                              product.id,
-                              -(cart[product.id] ?? 0),
-                              product.availableUnits,
-                            )
-                          }
+                  {order.status === 'paid' && (
+                    <>
+                      <StatusBanner variant="paid" title="Payment confirmed" code="PAID">
+                        {order.paidAt
+                          ? `Paid at ${formatDateTime(order.paidAt)} — head to the locker to collect.`
+                          : 'Payment confirmed — head to the locker to collect.'}
+                      </StatusBanner>
+
+                      <div className="order-action">
+                        <Button
+                          variant="primary"
+                          size="lg"
+                          onClick={() => void claimPickup()}
+                          loading={claiming}
                         >
-                          remove
-                        </button>
-                      </li>
-                    ))}
-                </ul>
-                <p className="muted">
-                  The total is calculated by the server when the order is placed — prices are read
-                  from the catalog at that moment.
-                </p>
-                <button
-                  type="button"
-                  className="primary"
-                  onClick={() => void placeOrder()}
-                  disabled={placing}
-                >
-                  {placing ? 'Placing order…' : 'Place order'}
-                </button>
-              </>
-            )}
-            {orderError !== null && <p className="error-banner">{orderError}</p>}
-          </div>
-        </section>
-      )}
+                          {claiming ? 'Claiming…' : 'Confirm pickup'}
+                        </Button>
+                      </div>
+                    </>
+                  )}
 
-      {screen === 'order' && order !== null && (
-        <section aria-label="Order">
-          <button type="button" className="link" onClick={backToCatalog}>
-            ← Back to catalog
-          </button>
+                  {order.status === 'picked_up' && (
+                    <>
+                      <StatusBanner variant="picked_up" title="Picked up" code="PICKED_UP">
+                        {order.pickedUpAt ? 'Enjoy your snacks!' : 'Enjoy your snacks!'}
+                      </StatusBanner>
+                    </>
+                  )}
 
-          <div className="panel">
-            <h2>Order {order.id.slice(0, 8)}…</h2>
-            <ul className="summary-list">
-              {order.items.map((item) => (
-                <li key={item.productId}>
-                  {item.name} × {item.quantity} — {formatPaise(item.lineTotalPaise)}{' '}
-                  <span className="muted">({formatPaise(item.unitPricePaise)} each)</span>
-                </li>
-              ))}
-            </ul>
-            <p className="total">
-              Total (server-computed): <strong>{formatPaise(order.totalPaise)}</strong>
-            </p>
+                  {order.status === 'expired' && (
+                    <>
+                      <StatusBanner variant="expired" title="Hold expired" code="EXPIRED">
+                        The hold expired before payment arrived. Your items are available again.
+                      </StatusBanner>
 
-            {order.status === 'pending' && (
-              <>
-                <div className="countdown" aria-live="polite">
-                  {countdown !== null ? formatCountdown(countdown) : '…'}
+                      <div className="order-action">
+                        <Button variant="primary" onClick={backToCatalog}>
+                          Order something else
+                        </Button>
+                      </div>
+                    </>
+                  )}
+
+                  {order.status === 'needs_review' && (
+                    <StatusBanner variant="review" title="Flagged for review" code="NEEDS_REVIEW">
+                      Payment received but flagged for review (
+                      {order.needsReviewReason === 'amount_mismatch'
+                        ? 'amount did not match the order total'
+                        : order.needsReviewReason === 'late_payment'
+                          ? 'payment arrived after the hold expired'
+                          : 'manual review'}
+                      ). No action needed from you — staff will resolve it.
+                    </StatusBanner>
+                  )}
+
+                  {actionError !== null && (
+                    <div className="order-error">
+                      <StatusBanner variant="error" code="ERROR">
+                        {actionError}
+                      </StatusBanner>
+                    </div>
+                  )}
                 </div>
-                <p className="status-banner status--pending">
-                  {countdown === 0
-                    ? 'Time is up — waiting for the server to confirm the hold…'
-                    : 'Awaiting payment — the hold keeps your items until the timer runs out.'}
-                </p>
+              </div>
+            </>
+          )}
+        </div>
+      </main>
 
-                <div className="panel panel--inner">
-                  <h3>How to pay (demo)</h3>
-                  <p>
-                    The payment provider confirms payment with an HMAC-signed webhook. Trigger it
-                    from the repository root with:
-                  </p>
-                  <pre className="code">
-                    npm run -w apps/api send-webhook -- --order-id {order.id} --amount{' '}
-                    {order.totalPaise}
-                  </pre>
-                  <p className="muted">
-                    The amount must equal the order total exactly; a mismatch or a late payment
-                    sends the order to manual review, never straight to paid.
-                  </p>
-                </div>
-                <p className="muted">Polling the server every 2 s for the payment result…</p>
-              </>
-            )}
-
-            {order.status === 'paid' && (
-              <>
-                <p className="status-banner status--paid">
-                  Payment confirmed
-                  {order.paidAt ? ` at ${new Date(order.paidAt).toISOString()}` : ''} — head to the
-                  locker to collect.
-                </p>
-                <button
-                  type="button"
-                  className="primary"
-                  onClick={() => void claimPickup()}
-                  disabled={claiming}
-                >
-                  {claiming ? 'Claiming…' : 'Confirm pickup'}
-                </button>
-              </>
-            )}
-
-            {order.status === 'picked_up' && (
-              <p className="status-banner status--picked_up">
-                ✓ Picked up
-                {order.pickedUpAt ? ` at ${new Date(order.pickedUpAt).toISOString()}` : ''} — enjoy!
-              </p>
-            )}
-
-            {order.status === 'expired' && (
-              <>
-                <p className="status-banner status--expired">
-                  The hold expired before payment arrived. Your items are available again.
-                </p>
-                <button type="button" className="primary" onClick={backToCatalog}>
-                  Order something else
-                </button>
-              </>
-            )}
-
-            {order.status === 'needs_review' && (
-              <p className="status-banner status--review">
-                Payment received but flagged for review (
-                {order.needsReviewReason === 'amount_mismatch'
-                  ? 'amount did not match the order total'
-                  : order.needsReviewReason === 'late_payment'
-                    ? 'payment arrived after the hold expired'
-                    : (order.needsReviewReason ?? 'manual review')}
-                ). No action needed from you — staff will resolve it.
-              </p>
-            )}
-
-            {actionError !== null && <p className="error-banner">{actionError}</p>}
-            <p className="muted">
-              The displayed status always comes straight from the server; the timer above never
-              decides the outcome.
-            </p>
-          </div>
-        </section>
-      )}
-    </main>
+      <Footer />
+    </div>
   );
 }
