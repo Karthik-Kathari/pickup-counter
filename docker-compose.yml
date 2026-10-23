@@ -43,7 +43,7 @@ services:
       NODE_ENV: production
       # Inside the compose network the database host is the service name `db`.
       DATABASE_URL: 'postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-pickup_counter}'
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me-local-dev-secret}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-compose-local-dev-webhook-secret}
     depends_on:
       db:
         condition: service_healthy
@@ -56,7 +56,7 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: 'postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-pickup_counter}'
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me-local-dev-secret}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-compose-local-dev-webhook-secret}
       API_PORT: 3001
       HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-120}
     depends_on:
