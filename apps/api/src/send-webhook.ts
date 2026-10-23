@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { ConfigError, loadConfig } from './config.js';

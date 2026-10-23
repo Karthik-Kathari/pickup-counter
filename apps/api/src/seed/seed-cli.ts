@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../load-env.js';
 import { ConfigError, loadConfig } from '../config.js';
 import { runMigrations } from '../db/migrate.js';
 import { createPool } from '../db/pool.js';

@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env.js';
 import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { ConfigError, loadConfig } from './config.js';
