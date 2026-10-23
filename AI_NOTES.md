@@ -76,6 +76,14 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Detected by:** Reading the Dockerfile during the submission audit (inspection, not a test — no Docker exists on this machine to fail it).
 - **Resolution:** Changed to `CMD ["node", "apps/api/dist/server.js"]`. Honest caveat recorded in the plan: this remains **unverified locally** (`docker: command not found`); the corrected form follows the Dockerfile reference syntax.
 
+- **Mistake 2 (fresh clones failed `format:check`):** the repo had no `.gitattributes`, so on Windows (`core.autocrlf=true`) a fresh clone checked every file out as CRLF while Prettier's default `endOfLine` is `lf` — 48 files failed in the clone even though the working tree passed (it only passed because Prettier/ESLint had rewritten those files with LF in place).
+- **Detected by:** actually running the documented sequence in a real fresh clone for the first time (clean-clone audit, G3) instead of trusting the passing working tree.
+- **Resolution:** added `.gitattributes` (`* text=auto eol=lf`) and stated `"endOfLine": "lf"` in `.prettierrc.json`; the re-cloned `format:check` passes.
+
+- **Mistake 3 (the root `.env` was silently ignored):** all four entry points used `import 'dotenv/config'`, which resolves `.env` from `process.cwd()` — but npm runs workspace scripts with `cwd = apps/api`, so the repository-root `.env` that the README documents was never loaded. `npm run migrate` in the fresh clone hit `ECONNREFUSED ::1:5432` because the built-in dev defaults were used instead. `apps/web/vite.config.ts` had the same class of bug (`loadEnv` only from `apps/web`). The defect had survived since Phase 1 because the dev machine had no `.env` and the defaults happened to equal the Compose values.
+- **Detected by:** the same clean-clone run — the `migrate` step failed with exit 1 while `npm test` (which reads `TEST_DATABASE_URL` from the shell) passed.
+- **Resolution:** `src/load-env.ts` loads the `.env` from `INIT_CWD` (the directory npm was invoked from) then the cwd one, without ever overriding real environment variables; the four entry points import it, and the Vite config merges the repo-root env over the cwd one. Verified with `DATABASE_URL` stripped from the environment: migrate/seed now resolve the root `.env`, and `loadEnv(repoRoot)` returns `VITE_API_BASE_URL` where the old lookup returned nothing.
+
 ## 5. Human verification performed
 
 **Status: PENDING — no human verification has been performed yet.**
