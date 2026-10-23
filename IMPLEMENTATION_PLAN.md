@@ -150,7 +150,7 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   **Recorded during implementation (Phase 4 recovery):**
   - The prior attempt left `src/webhook.ts`, `src/app.ts` and `tests/webhook.integration.test.ts` in a corrupted state (duplicated/partial `import … as any;` lines that are not valid TypeScript, and the "test" file was actually a stale copy of an older webhook source rather than a test). These were reconstructed cleanly rather than patched line-by-line.
   - Two real correctness bugs were fixed during the repair: (1) the handler read/wrote `payment_events.provider_status` and `received_amount_paise`, columns that do not exist in `0001_init.sql` — removed, since `status` and `amount_paise` already carry the provider status and received amount; (2) late-payment detection compared `expires_at` to `new Date()` (a Node clock, violating I2) and attempted a `pending→expired→needs_review` double flip where the second guarded `UPDATE … WHERE status='pending'` could never match — replaced with a single DB-clock `needs_review('late_payment')` transition.
-  - The `send-webhook` sender script (C14) was NOT built in this pass; the webhook is exercised directly by integration tests that construct and sign the requests in-process. Tracked as PLANNED in `ACCEPTANCE_CRITERIA.md`.
+  - The `send-webhook` sender script (C14) was NOT built in this pass; the webhook is exercised directly by integration tests that construct and sign the requests in-process. Tracked as PLANNED in `ACCEPTANCE_CRITERIA.md`. _(Completed in the final audit: `src/webhook-sender.ts` + `src/send-webhook.ts` CLI, T-SEND-01/02, live-verified — see the Phase 7 / final-audit note below.)_
 
 - **Common failure modes:**
   - Signing the parsed JSON body — signature breaks whenever serialization differs (whitespace, key order). Always the raw buffer.
@@ -220,9 +220,14 @@ Work proceeds strictly phase by phase: **a phase's exit criteria must be demonst
   - Docker Compose extended so `docker compose up --build` starts db + api + web and the app is usable in a browser end-to-end.
 - **Commands:** `docker compose up --build`, then manual walkthrough: browse → cart → order → countdown → webhook → UI flips to paid → claim → picked up.
 - **Exit criteria:**
-  - [ ] Full manual happy path works in a browser with the system clock deliberately shifted ±10 minutes (countdown still correct; only the server's numbers drive it).
-  - [ ] Insufficient stock and expired-order paths show honest messages.
-  - [ ] No console errors; polling stops on terminal states.
+  - [ ] Full manual happy path works in a browser with the system clock deliberately shifted ±10 minutes (countdown still correct; only the server's numbers drive it). _(**NOT RUN — human step:** deliberately shifting the machine's OS clock was left to the reviewer. The countdown's clock-independence is verified by inspection: `performance.now()` anchors + server re-sync, no `Date.now()` arithmetic.)_
+  - [x] Insufficient stock and expired-order paths show honest messages. _(Browser-verified in the final audit: `INSUFFICIENT_STOCK — … nothing was reserved (3 requested / 0 available)` on a held-out product, and `The hold expired before payment arrived…` + re-order button after a DB-aged hold flipped via the poll.)_
+  - [x] No console errors; polling stops on terminal states. _(Network log: order GETs every 2 s stop at the paid/expired/needs_review flip — only the claim POST follows; console shows vite/React-devtools lines plus one browser-native `Failed to load resource: 409` for the deliberately triggered rejection, which the app rendered as its banner; zero application/JS errors.)_
+- **Recorded during the final audit (no new phase opened):**
+  - The Phase 1 placeholder `App.tsx` (health badge only) was replaced with the customer screen above; `index.css` extended; a failed placement now refreshes the catalog so displayed availability follows the server.
+  - Browser walkthrough against the **compiled** API (`node apps/api/dist/server.js`) + Vite dev covered: catalog → cart → `201` with server total → countdown → `send-webhook` → `paid` (≤2 s, polling stopped) → **Confirm pickup** → `picked_up` with DB stock 35→34 exactly once → expired banner → `needs_review` banner → insufficient-stock banner. Zero app console errors.
+  - C14 `send-webhook` built and live-tested (correct amount → `HTTP 200 {"received": true}`; wrong amount → `2xx AMOUNT_MISMATCH` → `needs_review`).
+  - Docker/Compose: added the `web` service (nginx proxy) and `apps/web/Dockerfile`; also fixed the Phase 1 `CMD ['node', …]` single-quoted exec form in `apps/api/Dockerfile` (Docker's JSON form requires double quotes — found by inspection). **All Docker paths remain NOT RUN: `docker: command not found` on this machine.**
 - **Common failure modes:**
   - Countdown derived from `new Date(expiresAt)` arithmetic — breaks on skewed clocks; forbidden.
   - Polling forever after `expired` — must stop on terminal statuses.

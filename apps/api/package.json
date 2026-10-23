@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "migrate": "tsx src/db/migrate-cli.ts",
-    "seed": "tsx src/seed/seed-cli.ts"
+    "seed": "tsx src/seed/seed-cli.ts",
+    "send-webhook": "tsx src/send-webhook.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

@@ -3,7 +3,7 @@
 Honest record of how AI was used while building this project.
 **Rule: never fabricate.** Only record what actually happened, when it happened. Fields stay `PENDING` until real experience fills them. Recording a fabricated tool, prompt, mistake, or verification is itself an academic-integrity violation.
 
-_Last updated: Phase 5 (atomic pickup claims)._
+_Last updated: Phase 7 (customer screen) + final submission audit._
 
 ---
 
@@ -19,6 +19,7 @@ _Last updated: Phase 5 (atomic pickup claims)._
 - Drafted the Phase 0 engineering documents (`AGENTS.md`, plan, acceptance criteria, README, `.env.example`).
 - Implemented all Phase 1 code: workspace configs, zod-backed `config.ts`, migration runner, `0001_init.sql`, seed, `/health`, Docker artifacts, the web starter, and the Vitest suites.
 - Ran and interpreted the verification commands (install, lint, typecheck, build, tests, and the real-PostgreSQL checks), and caught failures rather than routing around them.
+- Final audit: built the Phase 7 customer screen (`apps/web`) and the C14 `send-webhook` sender, exercised the full flow in a browser against the compiled API, ran the git-history secret sweep, and re-ran every gate (typecheck, lint, format, build, 63/63 tests on real PostgreSQL 18.4).
 
 ## 3. One prompt that worked well
 
@@ -68,6 +69,12 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Mistake (self-contradictory claim transaction):** The first `claimOrder` implementation ran the lazy `pending → expired` flip (the same guarded UPDATE used by `GET /orders/:id`) inside the claim transaction, and its doc comment claimed the endpoint was a new "observation point" that materializes expiry. But every rejected claim is designed to `ROLLBACK` — so the flip was always undone, and the endpoint could answer `409 ORDER_EXPIRED` while the stored row still said `pending`. The design contradicted its own rollback semantics.
 - **Detected by:** The AI-written test T-PICK-02 (`apps/api/tests/pickup.integration.test.ts`): the claim itself correctly returned `409 ORDER_EXPIRED`, but the next assertion — that the row had been materialized to `expired` — failed with `AssertionError: expected 'pending' to be 'expired'`. The test refused the inconsistency instead of being relaxed to accept `pending`.
 - **Resolution:** Rejected claims are now strictly read-only: the locking `SELECT … FOR UPDATE` carries `(expires_at <= now()) AS is_expired` (database clock, I2) and the eligibility gate uses it directly — `expired`/stale-`pending` → `ORDER_EXPIRED` with zero writes. Expiry materialization stays with the two documented observation points. T-PICK-02 now asserts the row is still `pending` after the rejected claim and flips to `expired` at the very next `GET`, which proves both the read-only rejection and the lifecycle behavior.
+
+### Later real mistakes (final audit)
+
+- **Mistake (latent Phase 1 defect):** `apps/api/Dockerfile` ended with `CMD ['node', 'apps/api/dist/server.js']` — Docker's exec form is JSON and requires double quotes; the single-quoted form is invalid and would likely fail the image build. It survived because Docker was never available to run the build.
+- **Detected by:** Reading the Dockerfile during the submission audit (inspection, not a test — no Docker exists on this machine to fail it).
+- **Resolution:** Changed to `CMD ["node", "apps/api/dist/server.js"]`. Honest caveat recorded in the plan: this remains **unverified locally** (`docker: command not found`); the corrected form follows the Dockerfile reference syntax.
 
 ## 5. Human verification performed
 

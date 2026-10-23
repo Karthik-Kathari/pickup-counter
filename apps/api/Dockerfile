@@ -31,4 +31,4 @@ COPY apps/api/migrations apps/api/migrations
 
 USER node
 EXPOSE 3001
-CMD ['node', 'apps/api/dist/server.js']
+CMD ["node", "apps/api/dist/server.js"]

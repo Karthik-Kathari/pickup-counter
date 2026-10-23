@@ -1,4 +1,4 @@
-# Docker Compose — PostgreSQL + API with one command:
+# Docker Compose — PostgreSQL + API + web UI with one command:
 #
 #   docker compose up --build
 #
@@ -6,9 +6,8 @@
 #   db     → healthcheck (pg_isready) gates everything downstream
 #   init   → one-shot container: runs migrations, then seed, then exits 0
 #   api    → starts only after db is healthy AND init completed successfully
-#
-# The web frontend is NOT part of Compose yet; it arrives in Phase 7
-# (see IMPLEMENTATION_PLAN.md). Until then run it locally with `npm run dev:web`.
+#   web    → nginx serves the built customer screen and proxies API paths to
+#            the api service (same-origin in the browser, no CORS)
 #
 # Configuration comes from a root `.env` file (copy .env.example) via ${VAR}
 # substitution. No secrets are baked into images.
@@ -79,6 +78,17 @@ services:
       start_period: 10s
     ports:
       - '${API_PORT:-3001}:3001'
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '${WEB_PORT:-5173}:80'
     restart: unless-stopped
 
 volumes:
