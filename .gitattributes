@@ -1,0 +1,6 @@
+# Pin LF endings for every text file in the working tree, on every platform.
+# Without this, a Windows clone (core.autocrlf=true) checks out CRLF and
+# `npm run format:check` fails immediately, because Prettier's default
+# endOfLine is "lf" — a defect found by the clean-clone audit (G3) and fixed
+# here so a fresh clone passes every documented step.
+* text=auto eol=lf
