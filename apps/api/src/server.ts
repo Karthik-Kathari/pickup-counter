@@ -19,7 +19,11 @@ function bootstrap(): void {
   }
 
   const pool = createPool(config.databaseUrl);
-  const app = createApp({ pool, holdTtlSeconds: config.holdTtlSeconds });
+  const app = createApp({
+    pool,
+    holdTtlSeconds: config.holdTtlSeconds,
+    webhookSecret: config.webhookSecret,
+  });
 
   const server: Server = app.listen(config.apiPort, () => {
     console.log(`[api] listening on port ${config.apiPort} (${config.nodeEnv})`);

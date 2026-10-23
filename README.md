@@ -6,7 +6,7 @@ A full-stack, self-service **snack pickup counter**: customers reserve snacks fr
 >
 > Implemented and verified against **real PostgreSQL 18.4**: the Phase 1 foundation (monorepo, zod config, migrations, seed, health), the Phase 2 catalog and transaction-safe order reservations, and the Phase 3 order-status endpoint `GET /orders/:id` with a hardened lazy-expiration lifecycle. **Docker was not available on the development machine**, so `docker compose up --build` has been written and reviewed but not executed — run it on a Docker-capable machine.
 >
-> Not built yet: payment webhook (Phase 4), pickup endpoint (Phase 5), the customer UI (Phase 7). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
+> Not built yet: pickup endpoint (Phase 5), the customer UI (Phase 7). The signed payment webhook (Phase 4) is implemented and verified. See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
 
 ---
 
@@ -240,7 +240,7 @@ Implemented (`apps/api/tests/`):
   - T-LOCK-01 — two reversed-order concurrent multi-product orders: exactly one wins, no deadlocks, both products reserved once (5 rounds).
 - `orders-lifecycle.integration.test.ts` — 8 integration tests for `GET /orders/:id` and the expiration lifecycle (T-STATUS-01..09): pending response contract (items, paise totals, ISO timestamps, countdown ≤ hold); unknown → 404; non-UUID → 400; expired hold flips on access while availability is restored by the formula and physical stock stays untouched; repeated reads and sweeps idempotent with a never-increasing countdown; `paid`/`needs_review`/`picked_up` never expired even with passed deadlines; 8 concurrent reads on an expired order stay consistent; countdown follows the stored deadline deterministically (no sleeps).
 
-The webhook-replay and concurrent-pickup-claim mandatory scenarios belong to Phases 4–6 and are **not yet implemented**.
+`webhook.integration.test.ts` — 14 integration tests for `POST /payments/webhook` (T-WH-01..11, T-IDEM-01..03): valid signed capture → `paid` with `paid_at`; signature checked over the exact raw bytes (canonical JSON re-formatted ⇒ `401`); missing signature → `400`, non-hex / wrong-length / wrong-secret rejected with no state change; amount mismatch and DB-clock late payment → `needs_review` (never paid, physical stock untouched); unknown order and unsupported status recorded and acknowledged `2xx`; duplicate and 10-way concurrent duplicate `eventId` collapse to one `payment_events` row and one transition (mandatory scenario 2 — the webhook file was soak-looped 10× green against real PostgreSQL).
 
 ## Late-payment policy (conservative)
 
@@ -269,7 +269,8 @@ Executed on the development machine (Windows, Node v24.15.0, npm 11.12.1), again
 
 ## Limitations (current and known)
 
-- Payment webhook (Phase 4) and pickup endpoint (Phase 5) do not exist yet; two of the three mandatory concurrency scenarios (webhook replay, concurrent pickup claims) are therefore still pending.
+- The `send-webhook` sender script (C14) is not built; the webhook is exercised directly by integration tests that sign requests in-process.
+- The pickup endpoint (Phase 5) does not exist yet, so mandatory concurrency scenario 3 (two concurrent pickup claims) is still pending. Mandatory scenario 2 (webhook replay) is implemented and soak-tested.
 - The customer UI is a placeholder; the real storefront is Phase 7.
 - Compose is unverified on this machine (no Docker). The schema, migrations, seed and health behavior were verified against real PostgreSQL 18.4 rather than the Compose `postgres:16-alpine` image — same protocol/SQL surface, but the image itself still needs its first run.
 - No authentication/authorization, refunds automation, admin UI, or observability beyond `/health` — deliberately out of assignment scope.

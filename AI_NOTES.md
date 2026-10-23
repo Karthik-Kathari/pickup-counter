@@ -53,6 +53,16 @@ Why it worked: the explicit "do not claim X without actual execution" constraint
 - **Detected by:** Running the suite — both failures pointed at the test lines, not the endpoint. The `GET /orders/:id` implementation itself passed all nine required cases on its first run.
 - **Resolution:** Corrected the expected total and the parameter binding. Recorded here because both are real defects that existed in the committed code, however small.
 
+### Later real mistakes (Phase 4)
+
+- **Mistake 1 (tooling — self-inflicted file corruption):** While repairing the prior attempt, the agent repeatedly sliced `webhook.ts` with `tail -n +N`/`sed` on guessed line numbers and re-appended it, instead of reading the file and making a targeted edit. Each pass duplicated the import block (`import { createPool } from '...' as any;` — itself invalid TypeScript) and eventually chopped the top of the file off. This is why the earlier turns produced a long streak of "No change to the file" / TS1005 errors.
+- **Detected by:** `npx tsc -p tsconfig.json` reporting `TS1005: ';' expected` at the import lines, plus `head`/`cat -A` inspection showing duplicated `import … as any;` lines and a file that began mid-comment.
+- **Resolution:** Abandoned slicing entirely. Restored `app.ts` from git, then rewrote `app.ts` and `webhook.ts` coherently with `write_file`, and replaced the corrupted "test" file (which was actually a stale copy of an older webhook source, containing no `describe`/`it`) with a genuine integration suite. Lesson recorded: when targeted edits fail, read the whole file and rewrite it once — do not stitch it from guessed offsets.
+
+- **Mistake 2 (real correctness bugs in the inherited webhook code):** (a) The handler SELECTed/UPDATEed `payment_events.provider_status` and read `received_amount_paise` — columns that do not exist in `0001_init.sql`, so every event would have failed at runtime with "column does not exist"; `status` and `amount_paise` already carry those values. (b) Late-payment detection compared `expires_at <= new Date()` (a Node clock — a direct violation of invariant I2) and then attempted a `pending → expired → needs_review` double-flip, where the second guarded `UPDATE … WHERE status = 'pending'` could never match, silently leaving the order `expired` instead of `needs_review`. (c) `app.ts` mounted `express.json()` before the raw parser for the webhook path, which would have parsed-and-reserialized the body before the HMAC ran (violating I8).
+- **Detected by:** Reading `0001_init.sql` and the webhook source side by side during the audit (schema mismatch and `new Date()` are inspection catches), and by the raw-bytes test `T-WH-02` (re-formatted canonical JSON must be rejected) once the middleware order was corrected.
+- **Resolution:** Removed the non-existent column references; replaced the late-payment branch with a single DB-clock `needs_review('late_payment')` transition guarded by `FOR UPDATE`; moved `express.raw()` for `/payments/webhook` ahead of the global `express.json()`. All verified by the 14-test webhook suite plus a 10× soak on real PostgreSQL.
+
 ## 5. Human verification performed
 
 **Status: PENDING — no human verification has been performed yet.**

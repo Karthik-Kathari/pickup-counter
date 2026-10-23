@@ -72,7 +72,7 @@ export async function startTestServer(
   pool: Pool,
   holdTtlSeconds = 120,
 ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-  const app = createApp({ pool, holdTtlSeconds });
+  const app = createApp({ pool, holdTtlSeconds, webhookSecret: 'test-webhook-secret-12345678' });
   const server: Server = app.listen(0);
   await new Promise<void>((resolve, reject) => {
     server.once('listening', resolve);
